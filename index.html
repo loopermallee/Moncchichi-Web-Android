@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#16181D" />
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>Moncchichi Web Hub</title>
+    
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&display=swap" rel="stylesheet">
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              moncchichi: {
+                bg: '#0D0F12',
+                surface: '#16181D',
+                surfaceAlt: '#1E2127',
+                border: '#2A2A2A',
+                primary: '#C5CAD3',
+                accent: '#A691F2',
+                success: '#2EA66E',
+                warning: '#F0B429',
+                error: '#D64545',
+                text: '#FFFFFF',
+                textSec: '#9CA3AF',
+              }
+            },
+            fontFamily: {
+              sans: ['"Silkscreen"', 'cursive', 'sans-serif'],
+              mono: ['"Silkscreen"', 'monospace'],
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        background-color: #0D0F12;
+        color: #FFFFFF;
+        -webkit-tap-highlight-color: transparent;
+        user-select: none;
+        -webkit-user-select: none;
+        font-family: "Silkscreen", cursive; 
+        overflow-x: hidden;
+      }
+      /* Custom Scrollbar - Hidden but functional for mobile feel */
+      ::-webkit-scrollbar {
+        width: 0px;
+        background: transparent;
+      }
+      
+      /* Utilities for smooth momentum scrolling */
+      .scrollbar-hide {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+      
+      input, textarea {
+        user-select: text;
+        -webkit-user-select: text;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>

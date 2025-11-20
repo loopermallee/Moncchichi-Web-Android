@@ -1,0 +1,9 @@
+{
+  "name": "Moncchichi Android Hub",
+  "description": "Mobile companion app for Even Realities G1 Smart Glasses. Features real-time BLE telemetry, AI assistant, and teleprompter designed for Android devices.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation",
+    "bluetooth"
+  ]
+}
