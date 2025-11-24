@@ -7,6 +7,19 @@ export enum ConnectionState {
   ERROR = 'ERROR'
 }
 
+export enum HeadsetState {
+  IDLE = 'IDLE',
+  CONNECTING_LEFT = 'CONNECTING_LEFT',
+  LEFT_ONLINE_UNPRIMED = 'LEFT_ONLINE_UNPRIMED',
+  CONNECTING_RIGHT = 'CONNECTING_RIGHT',
+  RIGHT_ONLINE_UNPRIMED = 'RIGHT_ONLINE_UNPRIMED',
+  READY_BOTH = 'READY_BOTH',
+  STABLE = 'STABLE',
+  IDLE_SLEEP = 'IDLE_SLEEP',
+  WAKE_QUIET = 'WAKE_QUIET',
+  RECOVERING = 'RECOVERING'
+}
+
 export enum LensSide {
   LEFT = 'LEFT',
   RIGHT = 'RIGHT'
@@ -16,6 +29,7 @@ export interface DeviceVitals {
   batteryPercent: number | null;
   caseBatteryPercent: number | null;
   firmwareVersion: string | null;
+  hardwareId: string | null;
   signalRssi: number | null;
   isCharging: boolean;
   isWorn: boolean;
@@ -54,7 +68,8 @@ export enum MessageOrigin {
   OFFLINE = 'OFFLINE',
   DEVICE = 'DEVICE',
   SYSTEM = 'SYSTEM',
-  API = 'API'
+  API = 'API',
+  USER = 'USER'
 }
 
 export interface ChatMessage {

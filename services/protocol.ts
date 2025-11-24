@@ -2,6 +2,14 @@
 // Ported logic from Proto.dart and EvenaiProto.dart
 // Handles packet construction for Even Realities G1
 
+import { DeviceVitals } from '../types';
+
+export interface ProtocolEvent {
+  type: 'BATTERY' | 'STATE' | 'PAIRING' | 'DEBUG' | 'ACK' | 'UNKNOWN';
+  subType?: string;
+  data?: any;
+}
+
 export class Protocol {
   private static evenaiSeq = 0;
   private static beatHeartSeq = 0;
@@ -22,6 +30,11 @@ export class Protocol {
     ]);
   }
 
+  // [0x4D, 0xFB] - Set MTU to 251 (0xFB)
+  public static getSetMtuPacket(): Uint8Array {
+      return new Uint8Array([0x4D, 0xFB]);
+  }
+
   // [0x0E, 0x01]
   public static getMicEnablePacket(enable: boolean = true): Uint8Array {
     return new Uint8Array([0x0E, enable ? 0x01 : 0x00]);
@@ -32,12 +45,14 @@ export class Protocol {
     return new Uint8Array([0x01, value & 0xFF, auto ? 0x01 : 0x00]);
   }
   
-  // [0x03, enable ? 0x0C : 0x0A] (Based on logs/mock logic, command structure assumed based on typical pattern)
+  // [0x03, enable ? 0x01 : 0x00]
   public static getSilentModePacket(enable: boolean): Uint8Array {
-      // Placeholder: Exact opcode for silent mode isn't explicitly clear in snippets, using generic toggle structure
-      // If strictly following Proto.dart, we'd need the exact opcode. 
-      // For now, we use a safe placeholder or rely on Dashboard config.
       return new Uint8Array([0x03, enable ? 0x01 : 0x00]); 
+  }
+
+  // [0x23, 0x74] - Get Firmware Info
+  public static getFirmwareInfoPacket(): Uint8Array {
+      return new Uint8Array([0x23, 0x74]);
   }
 
   // [0x06, 0x07, 0x00, seq, 0x06, modeId, secondaryPaneId]
@@ -79,7 +94,6 @@ export class Protocol {
   }
 
   // [0x4B, msgId, maxSeq, seq, ...payload]
-  // Ported from _getNotifyPackList
   public static getNotificationPackets(
       msgId: number,
       appId: string,
@@ -110,7 +124,6 @@ export class Protocol {
           const end = Math.min(start + packLen, data.length);
           const chunk = data.slice(start, end);
           
-          // Header: [0x4B, msgId, maxSeq, seq]
           const header = [0x4B, msgId & 0xFF, maxSeq, seq];
           const packet = new Uint8Array(header.length + chunk.length);
           packet.set(header);
@@ -121,8 +134,6 @@ export class Protocol {
       return packets;
   }
 
-  // Text / AI Data Packets
-  // Based on EvenaiProto.evenaiMultiPackListV2
   public static getTextPackets(text: string, newScreen: number = 0x01 | 0x30): Uint8Array[] {
     const encoder = new TextEncoder();
     const data = encoder.encode(text);
@@ -134,7 +145,6 @@ export class Protocol {
 
     const maxSeq = Math.ceil(data.length / packLen);
     
-    // Fixed values for now, can be dynamic
     const pos = 0; 
     const currentPage = 1;
     const maxPage = 1;
@@ -144,8 +154,6 @@ export class Protocol {
       const end = Math.min(start + packLen, data.length);
       const chunk = data.slice(start, end);
 
-      // Header: [cmd, syncSeq, maxSeq, seq, newScreen, pos_hi, pos_lo, cur, max]
-      // Header Length: 9 bytes
       const header = [
         0x4E,
         syncSeq,
@@ -167,8 +175,126 @@ export class Protocol {
     return packets;
   }
   
-  // 0x18
   public static getExitPacket(): Uint8Array {
       return new Uint8Array([0x18]);
+  }
+
+  // Parse incoming telemetry based on G1 Protocol (F5 Events, 2C Battery, 37 Uptime)
+  public static parseTelemetry(data: Uint8Array): ProtocolEvent | null {
+      if (data.length === 0) return null;
+      const cmd = data[0];
+      
+      // 0x4D: MTU Acknowledgement
+      // Log: 4D-C9... (C9 = Success)
+      if (cmd === 0x4D) {
+          if (data.length > 1 && data[1] === 0xC9) {
+              return { type: 'ACK', subType: 'MTU' };
+          }
+          return { type: 'ACK', subType: 'MTU_FAIL' };
+      }
+
+      // 0x2C: Detailed Battery & State
+      // Log: 2C-66-64-64-D9...
+      // Header (2C) + Size (66) + Bat% (64=100)
+      if (cmd === 0x2C && data.length >= 3) {
+          const battery = data[2]; // Index 2 is Battery %
+          // Index 3+ are voltages and flags.
+          // We can extract more here if we map the bitmasks from the "Even G1 protocol" doc
+          // For now, the battery % is the most critical value.
+          return { 
+              type: 'BATTERY', 
+              subType: 'DETAILED', 
+              data: { batteryPercent: battery } 
+          };
+      }
+
+      // 0x37: Uptime (Time Since Boot)
+      // Log: 37-37-[TimeBytes]...
+      if (cmd === 0x37 && data.length >= 6) {
+          // Assuming 32-bit int Little Endian at offset 2
+          // 37-37-[B0-B1-B2-B3]
+          const uptime = data[2] | (data[3] << 8) | (data[4] << 16) | (data[5] << 24);
+          return { 
+              type: 'STATE', 
+              subType: 'UPTIME', 
+              data: { uptimeSeconds: uptime } 
+          };
+      }
+
+      // 0x2B: State Heartbeat (roughly 1/min)
+      // Log: 2B-69...
+      if (cmd === 0x2B) {
+          return { type: 'STATE', subType: 'HEARTBEAT', data: {} };
+      }
+
+      // 0x26: Display Settings ACK
+      // Log: 26-06-00-01-02-C9...
+      if (cmd === 0x26) {
+          const status = data.length > 5 ? data[5] : 0x00;
+          return { type: 'ACK', subType: 'DISPLAY_SETTINGS', data: { status } };
+      }
+
+      // 0x39: System Status
+      if (cmd === 0x39) {
+          return { type: 'ACK', subType: 'SYSTEM_STATUS', data: {} };
+      }
+
+      // 0xF5: Device Events (Gestures, Wear State)
+      if (cmd === 0xF5 && data.length >= 2) {
+          const subCmd = data[1];
+          switch (subCmd) {
+              case 0x11: // BLE Paired Success / Initial State Burst
+                  return { type: 'PAIRING', subType: 'SUCCESS' };
+              
+              case 0x06: // Worn
+                  return { type: 'STATE', subType: 'WORN', data: { isWorn: true, inCase: false } };
+              
+              case 0x07: // Not Worn (Idle)
+                  return { type: 'STATE', subType: 'NOT_WORN', data: { isWorn: false, inCase: false } };
+                  
+              case 0x08: // In Case, Lid Open
+                  return { type: 'STATE', subType: 'CASE_OPEN', data: { inCase: true, isWorn: false } };
+                  
+              case 0x0B: // In Case, Lid Closed (Deep Sleep)
+                  return { type: 'STATE', subType: 'CASE_CLOSED', data: { inCase: true, isWorn: false } };
+                  
+              case 0x0A: // Glasses Battery (Simpler event)
+                  return { type: 'BATTERY', subType: 'GLASSES', data: { batteryPercent: data[2] } };
+                  
+              case 0x0F: // Case Battery
+                  return { type: 'BATTERY', subType: 'CASE', data: { caseBatteryPercent: data[2] } };
+          }
+      }
+      
+      // Generic ACK: 0xC9 (Success)
+      if (cmd === 0xC9 && data.length >= 2) {
+          return { type: 'ACK', subType: 'SUCCESS', data: { cmdId: data[1] } };
+      }
+
+      // Generic NACK: 0xCA (Fail)
+      if (cmd === 0xCA && data.length >= 2) {
+          return { type: 'ACK', subType: 'FAILURE', data: { cmdId: data[1] } };
+      }
+
+      // Firmware Info Response or Debug Text
+      // 0xF4 is explicit debug, but logs also show pure text or 0x6E logs
+      if (cmd === 0xF4) {
+          const decoder = new TextDecoder();
+          const text = decoder.decode(data.slice(1)).replace(/\0/g, '');
+          return { type: 'DEBUG', data: text };
+      }
+
+      // Textual Log Detection
+      // If data looks like text (e.g. "net build time..."), treat as debug
+      // 0x20-0x7E are printable ASCII
+      if (data.length > 10 && data[0] >= 0x20 && data[0] <= 0x7E) {
+          const decoder = new TextDecoder();
+          const text = decoder.decode(data).replace(/\0/g, '');
+          if (text.includes("ver") || text.includes("build time") || text.includes("DeviceID") || text.includes("stack")) {
+              return { type: 'DEBUG', subType: 'FIRMWARE_INFO', data: text };
+          }
+      }
+      
+      return null;
   }
 }

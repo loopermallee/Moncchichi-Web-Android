@@ -4,6 +4,7 @@ import { ICONS, MOCK_LOGS_INIT } from './constants';
 import { LogEntry, ConnectionState } from './types';
 import { mockService } from './services/mockService';
 import { soundService } from './services/soundService';
+import { settingsService } from './services/settingsService'; // Auto-init settings
 import { getWeather, WeatherData } from './services/weatherService';
 import ConsoleLog from './components/ConsoleLog';
 import Dashboard from './views/Dashboard';
@@ -15,6 +16,7 @@ import WeatherRealtime from './views/WeatherRealtime';
 import Checklist from './views/Checklist';
 import Reader from './views/Reader';
 import Toast, { ToastType } from './components/Toast';
+import { CloudLightning } from 'lucide-react';
 
 type View = 'dashboard' | 'assistant' | 'teleprompter' | 'console' | 'permissions' | 'transport' | 'weather-realtime' | 'checklist' | 'reader';
 
@@ -66,7 +68,7 @@ function App() {
         lastState = state;
     });
 
-    // Fetch Weather
+    // Fetch Weather for basic widget state (optional usage)
     getWeather().then(setWeather);
 
     // Add global click listener for UI sounds
@@ -105,6 +107,10 @@ function App() {
     setLogs([]);
   };
 
+  const handleShowToast = (message: string, type: ToastType) => {
+    setToast({ message, type });
+  };
+
   const NavItem = ({ id, icon, label }: { id: View; icon: React.ReactNode; label: string }) => (
     <button
       onClick={() => {
@@ -127,21 +133,14 @@ function App() {
     </button>
   );
 
-  const renderWeatherIcon = () => {
-      if (!weather) return ICONS.Sun;
-      if (weather.rain > 0) return <div className="text-moncchichi-accent">{ICONS.CloudRain}</div>;
-      if (weather.status.toLowerCase().includes('cloud')) return <div className="text-moncchichi-textSec">{ICONS.Cloud}</div>;
-      return <div className="text-moncchichi-warning">{ICONS.Sun}</div>;
-  };
-
   return (
     <div className="flex flex-col h-screen bg-moncchichi-bg text-moncchichi-text selection:bg-moncchichi-accent selection:text-moncchichi-bg overflow-hidden">
       
       {/* Toast Notification */}
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
-      {/* Mobile Header */}
-      <header className="h-14 px-4 bg-moncchichi-surface border-b border-moncchichi-border flex items-center justify-between shrink-0 z-20 relative shadow-sm">
+      {/* Mobile Header - Increased z-index to [100] to appear above view headers */}
+      <header className="h-14 px-4 bg-moncchichi-surface border-b border-moncchichi-border flex items-center justify-between shrink-0 z-[100] relative shadow-sm">
         <div className="flex items-center gap-3">
           <div className="font-bold text-lg tracking-tighter uppercase text-moncchichi-accent select-none">Moncchichi</div>
         </div>
@@ -159,8 +158,6 @@ function App() {
                onClick={() => {
                  setIsMenuOpen(!isMenuOpen);
                  soundService.playInteraction();
-                 // Refresh weather on open if needed, but keeping it simple for now
-                 if (!isMenuOpen && !weather) getWeather().then(setWeather);
                }}
                className="p-2 -mr-2 text-moncchichi-textSec hover:text-moncchichi-text active:bg-moncchichi-surfaceAlt rounded-full transition-colors active:scale-95"
              >
@@ -170,40 +167,16 @@ function App() {
              {isMenuOpen && (
                <div className="absolute right-0 top-full mt-2 w-56 bg-moncchichi-surfaceAlt border border-moncchichi-border rounded-xl shadow-xl overflow-hidden py-1 animate-in fade-in zoom-in-95 duration-100 origin-top-right z-50">
                  
-                 {/* Weather Widget (Clickable to open Dashboard) */}
+                 {/* Renamed Weather Option */}
                  <button 
                      onClick={() => {
                          setCurrentView('weather-realtime');
                          setIsMenuOpen(false);
                      }}
-                     className="w-full text-left block"
+                     className="w-full px-4 py-3 text-left text-sm flex items-center gap-3 hover:bg-moncchichi-surface transition-colors active:bg-moncchichi-border/50"
                  >
-                     {weather ? (
-                         <div className="mx-2 mt-2 mb-2 px-3 py-3 bg-moncchichi-surface rounded-lg border border-moncchichi-border flex items-center justify-between hover:bg-moncchichi-border/30 transition-colors group">
-                            <div className="flex items-center gap-3">
-                                {renderWeatherIcon()}
-                                <div className="flex flex-col">
-                                    <span className="text-xs font-bold flex items-center gap-1">
-                                        {weather.temp.toFixed(1)}°C
-                                    </span>
-                                    <span className="text-[9px] text-moncchichi-textSec uppercase tracking-wider truncate max-w-[80px]">
-                                        {weather.status}
-                                    </span>
-                                </div>
-                            </div>
-                            {weather.rain > 0 ? (
-                                <span className="text-[9px] bg-moncchichi-accent text-moncchichi-bg px-1.5 py-0.5 rounded font-bold">
-                                    RAIN
-                                </span>
-                            ) : (
-                                <span className="text-[10px] text-moncchichi-textSec group-hover:text-moncchichi-accent transition-colors">{ICONS.Navigation}</span>
-                            )}
-                         </div>
-                     ) : (
-                         <div className="mx-2 mt-2 mb-2 px-3 py-3 bg-moncchichi-surface rounded-lg border border-moncchichi-border text-xs text-center text-moncchichi-textSec">
-                            Weather Loading...
-                         </div>
-                     )}
+                     <div className="text-moncchichi-textSec"><CloudLightning size={20} /></div>
+                     <span className="font-medium">Eye of the Storm</span>
                  </button>
 
                  <div className="h-px bg-moncchichi-border mx-2 my-1 opacity-50"></div>
@@ -254,7 +227,7 @@ function App() {
                  </button>
                  <div className="h-px bg-moncchichi-border my-1"></div>
                  <div className="px-4 py-2 text-[10px] text-moncchichi-textSec text-center">
-                   v1.0.1 (Build 44)
+                   v1.1.0 (Persistence Update)
                  </div>
                </div>
              )}
@@ -271,8 +244,8 @@ function App() {
             {currentView === 'teleprompter' && <Teleprompter />}
             {currentView === 'console' && <div className="h-full p-0"><ConsoleLog logs={logs} onClear={handleClearLogs} /></div>}
             {currentView === 'permissions' && <Permissions onBack={() => setCurrentView('dashboard')} />}
-            {currentView === 'transport' && <Transport onBack={() => setCurrentView('dashboard')} />}
-            {currentView === 'weather-realtime' && <WeatherRealtime onBack={() => setCurrentView('dashboard')} />}
+            {currentView === 'transport' && <Transport onBack={() => setCurrentView('dashboard')} onShowToast={handleShowToast} />}
+            {currentView === 'weather-realtime' && <WeatherRealtime onBack={() => setCurrentView('dashboard')} onShowToast={handleShowToast} />}
             {currentView === 'checklist' && <Checklist onBack={() => setCurrentView('dashboard')} />}
             {currentView === 'reader' && <Reader onBack={() => setCurrentView('dashboard')} />}
           </div>

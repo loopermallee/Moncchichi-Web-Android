@@ -2,23 +2,38 @@
 import React, { useEffect, useState } from 'react';
 import { mockService } from '../services/mockService';
 import { soundService } from '../services/soundService';
-import { DeviceVitals, ConnectionState } from '../types';
+import { settingsService } from '../services/settingsService';
+import { DeviceVitals, ConnectionState, HeadsetState } from '../types';
 import StatusCard from '../components/StatusCard';
 import { ICONS } from '../constants';
-import { Zap, ArrowDown } from 'lucide-react';
+import { Zap, ArrowDown, AlertTriangle, Activity, CheckCircle, Bug, Play, Power, AlertCircle } from 'lucide-react';
 
 const Dashboard: React.FC = () => {
   const [vitals, setVitals] = useState<DeviceVitals | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.DISCONNECTED);
-  const [isSimulating, setIsSimulating] = useState(mockService.isSimulating);
+  const [isSimulating, setIsSimulating] = useState(settingsService.get('isSimulating'));
+  
+  // Status UX State
+  const [statusText, setStatusText] = useState("Ready");
+  const [issueText, setIssueText] = useState<string | null>(null);
+  const [fixText, setFixText] = useState<string | null>(null);
 
   useEffect(() => {
     const unsubVitals = mockService.subscribeToVitals(setVitals);
     const unsubConn = mockService.subscribeToConnection(setConnectionState);
+    const unsubStatus = mockService.subscribeToStatus((status, issue, fix) => {
+        setStatusText(status);
+        setIssueText(issue);
+        setFixText(fix);
+    });
+    
+    // Sync with settings service
     setIsSimulating(mockService.isSimulating);
+    
     return () => {
       unsubVitals();
       unsubConn();
+      unsubStatus();
     };
   }, []);
 
@@ -43,12 +58,13 @@ const Dashboard: React.FC = () => {
 
   const toggleSimulation = () => {
       const newState = !isSimulating;
-      mockService.setSimulationMode(newState);
+      settingsService.set('isSimulating', newState);
       setIsSimulating(newState);
   };
 
   const isConnected = connectionState === ConnectionState.CONNECTED && (vitals || isSimulating);
   const isConnecting = connectionState === ConnectionState.CONNECTING;
+  const hasIssue = !!issueText;
 
   return (
     <div className="p-4 space-y-4 pb-24">
@@ -89,6 +105,72 @@ const Dashboard: React.FC = () => {
         {!isSimulating && !isConnected && (
             <div className="mt-2 text-center text-[10px] text-moncchichi-textSec">
                 Requires Web Bluetooth (Chrome/Edge). Enable #enable-web-bluetooth-new-permissions-backend in flags if needed.
+            </div>
+        )}
+
+        {/* Status Monitor & Troubleshooting UI */}
+        <div className={`mt-3 overflow-hidden transition-all duration-300 ${isConnecting || hasIssue ? 'max-h-64 opacity-100' : 'max-h-0 opacity-0'}`}>
+            {isConnecting && (
+                <div className="flex items-center gap-3 p-3 bg-moncchichi-surfaceAlt/50 rounded-lg border border-moncchichi-border">
+                    <Activity size={16} className="text-moncchichi-accent animate-pulse" />
+                    <span className="text-xs text-moncchichi-text font-mono">{statusText}</span>
+                </div>
+            )}
+            
+            {hasIssue && !isConnecting && (
+                <div className="bg-moncchichi-error/10 border border-moncchichi-error/30 rounded-lg p-3 animate-in slide-in-from-top-2">
+                    <div className="flex items-center gap-2 mb-1 text-moncchichi-error font-bold text-xs">
+                        <AlertTriangle size={14} />
+                        <span>{issueText || "Connection Error"}</span>
+                    </div>
+                    {fixText && (
+                        <div className="flex items-start gap-2 mt-2 text-[11px] text-moncchichi-text opacity-90 pl-1 border-l-2 border-moncchichi-error/50">
+                             <span className="font-bold text-moncchichi-error">FIX:</span> {fixText}
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+        
+        {isConnected && (
+            <div className="mt-3 flex items-center gap-2 justify-center text-[10px] text-moncchichi-success animate-in fade-in">
+                <CheckCircle size={12} />
+                <span>System Normal. Data Link Active.</span>
+            </div>
+        )}
+
+        {/* Simulation Override Controls */}
+        {isSimulating && (
+            <div className="mt-4 p-3 bg-moncchichi-surfaceAlt/30 rounded-xl border border-dashed border-moncchichi-accent/30">
+                <div className="flex items-center gap-2 mb-3 text-[10px] font-bold text-moncchichi-accent uppercase tracking-wider">
+                    <Bug size={12} /> Simulation Overrides
+                </div>
+                
+                <div className="space-y-3">
+                    <div>
+                        <span className="text-[10px] text-moncchichi-textSec block mb-1.5">Force Connection State</span>
+                        <div className="grid grid-cols-3 gap-2">
+                            <button 
+                                onClick={() => mockService.debugSetConnectionState(ConnectionState.DISCONNECTED)}
+                                className="px-2 py-1.5 text-[9px] font-mono bg-moncchichi-surface border border-moncchichi-border rounded hover:border-moncchichi-textSec text-moncchichi-textSec"
+                            >
+                                DISCONNECT
+                            </button>
+                            <button 
+                                onClick={() => mockService.debugSetConnectionState(ConnectionState.CONNECTING)}
+                                className="px-2 py-1.5 text-[9px] font-mono bg-moncchichi-surface border border-moncchichi-border rounded hover:border-moncchichi-warning text-moncchichi-warning"
+                            >
+                                CONNECTING
+                            </button>
+                             <button 
+                                onClick={() => mockService.debugTriggerError("Force Fail")}
+                                className="px-2 py-1.5 text-[9px] font-mono bg-moncchichi-surface border border-moncchichi-border rounded hover:border-moncchichi-error text-moncchichi-error"
+                            >
+                                ERROR
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>
         )}
       </div>
@@ -180,44 +262,6 @@ const Dashboard: React.FC = () => {
             >
                 <div className={`absolute top-1 w-5 h-5 rounded-full bg-white transition-all ${vitals?.silentMode ? 'left-6' : 'left-1'}`} />
             </button>
-        </div>
-      </div>
-
-      {/* Lens Status */}
-      <div className={`bg-moncchichi-surface rounded-xl p-4 border border-moncchichi-border transition-opacity duration-300 ${!isConnected ? 'opacity-60 grayscale-[0.3]' : ''}`}>
-        <h3 className="text-sm font-semibold mb-3 text-moncchichi-textSec uppercase tracking-wider">G1 Even Reality Glasses</h3>
-        <div className="space-y-3">
-          {/* Left Lens */}
-          <div className="flex items-center justify-between p-3 bg-moncchichi-surfaceAlt rounded-lg">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full bg-moncchichi-bg flex items-center justify-center text-moncchichi-accent font-bold text-sm border border-moncchichi-border">L</div>
-              <div>
-                <div className="font-medium text-sm">{vitals?.leftLensName || "Left Lens"}</div>
-                <div className="text-[10px] text-moncchichi-textSec">FW: {vitals?.firmwareVersion || '--'}</div>
-              </div>
-            </div>
-            <div className="text-right">
-              <div className={`text-xs ${isConnected ? 'text-moncchichi-success' : 'text-moncchichi-textSec'}`}>
-                {isConnected ? '● Connected' : '○ Disconnected'}
-              </div>
-            </div>
-          </div>
-          
-          {/* Right Lens */}
-          <div className="flex items-center justify-between p-3 bg-moncchichi-surfaceAlt rounded-lg">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 rounded-full bg-moncchichi-bg flex items-center justify-center text-moncchichi-accent font-bold text-sm border border-moncchichi-border">R</div>
-              <div>
-                <div className="font-medium text-sm">{vitals?.rightLensName || "Right Lens"}</div>
-                <div className="text-[10px] text-moncchichi-textSec">FW: {vitals?.firmwareVersion || '--'}</div>
-              </div>
-            </div>
-            <div className="text-right">
-              <div className={`text-xs ${isConnected ? 'text-moncchichi-success' : 'text-moncchichi-textSec'}`}>
-                {isConnected ? '● Connected' : '○ Disconnected'}
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     </div>

@@ -30,7 +30,7 @@ const Toast: React.FC<ToastProps> = ({ message, type, onClose }) => {
     }[type];
 
     return (
-        <div className={`fixed top-4 left-1/2 transform -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-3 rounded-xl border shadow-2xl animate-in slide-in-from-top-5 duration-300 ${bgColors[type]}`}>
+        <div className={`fixed top-4 left-1/2 transform -translate-x-1/2 z-[200] flex items-center gap-3 px-4 py-3 rounded-xl border shadow-2xl animate-in slide-in-from-top-5 duration-300 ${bgColors[type]}`}>
             <div>{icon}</div>
             <span className="text-sm font-medium text-moncchichi-text">{message}</span>
         </div>

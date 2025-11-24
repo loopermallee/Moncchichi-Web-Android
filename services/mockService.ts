@@ -1,7 +1,7 @@
 
-import { ConnectionState, DeviceVitals, LogEntry } from '../types';
+import { ConnectionState, DeviceVitals, LogEntry, HeadsetState } from '../types';
 import { BleDriver } from './bleDriver';
-import { Protocol } from './protocol';
+import { Protocol, ProtocolEvent } from './protocol';
 
 export interface MusicState {
     isPlaying: boolean;
@@ -18,214 +18,106 @@ class ServiceManager {
   private logListeners: ((entry: LogEntry) => void)[] = [];
   private connectionListeners: ((state: ConnectionState) => void)[] = [];
   private voiceListeners: ((text: string, isFinal: boolean) => void)[] = [];
-  private internalLogBuffer: LogEntry[] = []; 
+  private statusListeners: ((status: string, issue: string | null, fix: string | null) => void)[] = [];
   
+  private driver: BleDriver;
   private connectionState: ConnectionState = ConnectionState.DISCONNECTED;
-  private intervalId: any = null;
-  private heartbeatId: any = null;
-
-  // Mode
-  public isSimulating: boolean = false; // Default to real, fallback to mock
-  private bleDriver: BleDriver;
-
-  private state: DeviceVitals = {
-    batteryPercent: null,
-    caseBatteryPercent: null,
-    firmwareVersion: null,
-    signalRssi: null,
-    isCharging: false,
-    isWorn: false,
-    inCase: false,
-    uptimeSeconds: 0,
-    brightness: 50,
-    silentMode: false,
-    leftLensName: "Unknown",
-    rightLensName: "Unknown"
-  };
-
-  public musicState: MusicState = {
-      isPlaying: false,
-      track: "Midnight City",
-      artist: "M83"
-  };
+  private vitals: DeviceVitals | null = null;
   
-  public activeChecklist: string | null = null;
+  // Simulation State
+  public isSimulating: boolean = false;
+  private simInterval: any = null;
   
-  public navigationState: NavigationState = {
-      waypoints: []
-  };
+  // Status State
+  public connectionIssue: string | null = null;
+  public connectionFix: string | null = null;
 
+  // App State
+  public musicState: MusicState = { isPlaying: false, track: "Bohemian Rhapsody", artist: "Queen" };
+  
   constructor() {
-    this.bleDriver = new BleDriver(this.emitLog.bind(this));
-    // Auto-detect if Web Bluetooth is unavailable and default to sim
-    if (typeof navigator !== 'undefined' && !(navigator as any).bluetooth && !(window as any).Android) {
-        this.isSimulating = true;
-        this.emitLog("SYS", "WARN", "BLE capability unavailable, defaulting to Simulation");
-    }
-  }
-
-  public setSimulationMode(enabled: boolean) {
-      if (this.connectionState === ConnectionState.CONNECTED) {
-          this.disconnect();
-      }
-      this.isSimulating = enabled;
-      this.emitLog("SYS", "INFO", `Switched to ${enabled ? "Simulation" : "Real Device"} Mode`);
-  }
-
-  private startSimulation() {
-    this.state = {
-        batteryPercent: 82,
-        caseBatteryPercent: 95,
-        firmwareVersion: "v1.6.6",
-        signalRssi: -58,
+    this.driver = new BleDriver((level, tag, msg) => this.emitLog(tag, level, msg));
+    this.driver.setDataCallback((data) => this.handleIncomingData(data));
+    
+    // Default Vitals
+    this.vitals = {
+        batteryPercent: 85,
+        caseBatteryPercent: 92,
+        firmwareVersion: "1.6.6",
+        hardwareId: "G1_7_L",
+        signalRssi: -55,
         isCharging: false,
-        isWorn: true,
-        inCase: false,
-        uptimeSeconds: 1240,
-        brightness: 75,
+        isWorn: false,
+        inCase: true,
+        uptimeSeconds: 0,
+        brightness: 50,
         silentMode: false,
-        leftLensName: "G1_L_E4A1",
-        rightLensName: "G1_R_B2C9"
+        leftLensName: "Even G1_7_L",
+        rightLensName: "Even G1_7_R"
     };
-
-    if (this.intervalId) clearInterval(this.intervalId);
-    this.intervalId = setInterval(() => {
-      this.simulateTelemetryUpdate();
-    }, 5000);
   }
 
-  private startRealHeartbeat() {
-      if (this.heartbeatId) clearInterval(this.heartbeatId);
-      this.heartbeatId = setInterval(async () => {
-          if (this.connectionState === ConnectionState.CONNECTED) {
-              const packet = Protocol.getHeartbeatPacket();
-              await this.bleDriver.write(packet);
-              // In a real app, we'd parse the RX notification response to update battery, etc.
-          }
-      }, 15000); // 15s per Android impl
-  }
-
-  private stopSimulation() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-    if (this.heartbeatId) {
-        clearInterval(this.heartbeatId);
-        this.heartbeatId = null;
-    }
-  }
+  // --- State Management ---
 
   public getConnectionState(): ConnectionState {
     return this.connectionState;
   }
 
-  public getVitals(): DeviceVitals {
-    return this.state;
+  public getVitals(): DeviceVitals | null {
+    return this.vitals;
   }
 
-  public getRecentLogs(): LogEntry[] {
-    return this.internalLogBuffer;
-  }
-
-  public disconnect() {
-    this.stopSimulation();
-    if (this.isSimulating) {
-        this.connectionState = ConnectionState.DISCONNECTED;
-        this.emitLog("BLE", "WARN", "User initiated disconnect (Sim)");
-    } else {
-        this.bleDriver.disconnect();
-        this.connectionState = ConnectionState.DISCONNECTED;
-    }
-    this.notifyConnectionListeners();
-    this.notifyListeners();
-  }
-
-  public async connect() {
-    if (this.connectionState === ConnectionState.CONNECTED) return;
-
-    this.connectionState = ConnectionState.CONNECTING;
-    this.notifyConnectionListeners();
-    
-    if (this.isSimulating) {
-        this.emitLog("BLE", "INFO", "Simulating G1 Connection...");
-        try {
-            await new Promise(r => setTimeout(r, 1500));
-            this.connectionState = ConnectionState.CONNECTED;
-            this.startSimulation();
-            this.emitLog("BLE", "INFO", "Simulated Connection established");
-            this.notifyConnectionListeners();
-            this.notifyListeners();
-        } catch (err: any) {
-            this.connectionState = ConnectionState.ERROR;
-            this.notifyConnectionListeners();
-        }
-    } else {
-        this.emitLog("BLE", "INFO", "Starting BLE connection...");
-        const success = await this.bleDriver.connect();
-        if (success) {
-            this.connectionState = ConnectionState.CONNECTED;
-            this.startRealHeartbeat();
-            // Initial config
-            // Enable Mic? Or wait for intent?
-            // this.bleDriver.write(Protocol.getMicEnablePacket(true)); 
-            this.notifyConnectionListeners();
-        } else {
-            this.connectionState = ConnectionState.DISCONNECTED; // Or Error
-            this.notifyConnectionListeners();
-        }
-    }
-  }
-
-  private simulateTelemetryUpdate() {
-    if (this.connectionState !== ConnectionState.CONNECTED) return;
-
-    const rssiNoise = Math.floor(Math.random() * 5) - 2;
-    this.state = {
-      ...this.state,
-      signalRssi: -58 + rssiNoise,
-      uptimeSeconds: this.state.uptimeSeconds + 5
-    };
-    this.notifyListeners();
-  }
-
-  public subscribeToVitals(callback: (vitals: DeviceVitals | null) => void) {
+  public subscribeToVitals(callback: (vitals: DeviceVitals | null) => void): () => void {
     this.listeners.push(callback);
-    callback(this.connectionState === ConnectionState.CONNECTED ? this.state : null);
+    callback(this.vitals);
     return () => {
       this.listeners = this.listeners.filter(l => l !== callback);
     };
   }
 
-  public subscribeToLogs(callback: (entry: LogEntry) => void) {
+  public subscribeToLogs(callback: (entry: LogEntry) => void): () => void {
     this.logListeners.push(callback);
     return () => {
       this.logListeners = this.logListeners.filter(l => l !== callback);
     };
   }
 
-  public subscribeToConnection(callback: (state: ConnectionState) => void) {
+  public subscribeToConnection(callback: (state: ConnectionState) => void): () => void {
     this.connectionListeners.push(callback);
     callback(this.connectionState);
     return () => {
       this.connectionListeners = this.connectionListeners.filter(l => l !== callback);
     };
   }
+  
+  public subscribeToVoice(callback: (text: string, isFinal: boolean) => void): () => void {
+      this.voiceListeners.push(callback);
+      return () => {
+          this.voiceListeners = this.voiceListeners.filter(l => l !== callback);
+      };
+  }
 
-  public subscribeToVoice(callback: (text: string, isFinal: boolean) => void) {
-    this.voiceListeners.push(callback);
-    return () => {
-      this.voiceListeners = this.voiceListeners.filter(l => l !== callback);
-    };
+  public subscribeToStatus(callback: (status: string, issue: string | null, fix: string | null) => void): () => void {
+      this.statusListeners.push(callback);
+      callback("Ready", this.connectionIssue, this.connectionFix);
+      return () => {
+          this.statusListeners = this.statusListeners.filter(l => l !== callback);
+      };
   }
 
   private notifyListeners() {
-    const data = this.connectionState === ConnectionState.CONNECTED ? this.state : null;
-    this.listeners.forEach(l => l(data));
+    this.listeners.forEach(l => l(this.vitals));
   }
 
-  private notifyConnectionListeners() {
-    this.connectionListeners.forEach(l => l(this.connectionState));
+  private setConnectionState(state: ConnectionState) {
+    this.connectionState = state;
+    this.connectionListeners.forEach(l => l(state));
+  }
+  
+  private emitStatus(status: string, issue: string | null, fix: string | null) {
+      this.connectionIssue = issue;
+      this.connectionFix = fix;
+      this.statusListeners.forEach(l => l(status, issue, fix));
   }
 
   public emitLog(tag: string, level: LogEntry['level'], message: string) {
@@ -236,132 +128,231 @@ class ServiceManager {
       level,
       message
     };
-    
-    this.internalLogBuffer.push(entry);
-    if (this.internalLogBuffer.length > 200) {
-        this.internalLogBuffer.shift();
-    }
-
     this.logListeners.forEach(l => l(entry));
   }
 
-  public emitVoiceData(text: string, isFinal: boolean = true) {
-    if (isFinal) {
-        this.emitLog("BLE", "INFO", `[VOICE] Received: "${text}"`);
-    }
-    this.voiceListeners.forEach(l => l(text, isFinal));
+  // --- BLE & Simulation Control ---
+
+  public setSimulationMode(enabled: boolean) {
+      this.isSimulating = enabled;
+      if (enabled) {
+          this.startSimulation();
+      } else {
+          this.stopSimulation();
+          this.disconnect();
+      }
   }
 
-  // Main Command Interface
-  public async sendCommand(cmd: string, payload?: any): Promise<string> {
-    if (this.connectionState !== ConnectionState.CONNECTED) {
-        this.emitLog("APP", "ERROR", `Cannot send ${cmd}: Device disconnected`);
-        return "ERROR";
-    }
+  public async connect() {
+      if (this.isSimulating) {
+          this.setConnectionState(ConnectionState.CONNECTING);
+          setTimeout(() => {
+              this.setConnectionState(ConnectionState.CONNECTED);
+              this.emitStatus("Simulated Connection Active", null, null);
+          }, 800);
+          return;
+      }
 
-    if (this.isSimulating) {
-        return this.handleMockCommand(cmd, payload);
-    } else {
-        return this.handleRealCommand(cmd, payload);
-    }
+      this.setConnectionState(ConnectionState.CONNECTING);
+      this.emitStatus("Scanning for G1...", null, null);
+      this.connectionIssue = null;
+      this.connectionFix = null;
+
+      try {
+          const success = await this.driver.connect();
+          if (success) {
+              this.emitStatus("Negotiating Link...", null, null);
+              // HANDSHAKE: Send MTU Request immediately
+              this.emitLog("BLE", "INFO", "Handshake: Requesting MTU 251...");
+              await this.sendCommandRaw(Protocol.getSetMtuPacket());
+          } else {
+              this.setConnectionState(ConnectionState.DISCONNECTED);
+              this.emitStatus("Ready", null, null);
+          }
+      } catch (e: any) {
+          this.setConnectionState(ConnectionState.ERROR);
+          const msg = e.message || "Unknown";
+          
+          // Map driver errors to user-friendly status
+          if (msg === "UserCancelled") {
+             this.setConnectionState(ConnectionState.DISCONNECTED);
+             this.emitStatus("Ready", null, null);
+          } else if (msg === "SecurityError") {
+             this.emitStatus("Permission Denied", "Bluetooth permission blocked", "Check browser site settings or permissions icon in address bar.");
+          } else if (msg === "NetworkError") {
+             this.emitStatus("Connection Failed", "Device unreachable or busy", "Ensure glasses are awake, charged, and not paired to another app.");
+          } else if (msg === "NotSupportedError" || msg === "WebBluetoothUnsupported") {
+             this.emitStatus("Unsupported", "Web Bluetooth missing", "Use Chrome, Edge, or Bluefy (iOS). Enable #enable-web-bluetooth-new-permissions-backend flags if on Android.");
+          } else if (msg === "NoDeviceSelected") {
+             this.setConnectionState(ConnectionState.DISCONNECTED);
+             this.emitStatus("Ready", null, null);
+          } else {
+             this.emitStatus("Error", "Connection failed", msg);
+          }
+      }
   }
 
-  // Real Device Logic
-  private async handleRealCommand(cmd: string, payload?: any): Promise<string> {
-      let packet: Uint8Array | Uint8Array[] | null = null;
+  public disconnect() {
+      this.driver.disconnect();
+      this.setConnectionState(ConnectionState.DISCONNECTED);
+      this.emitStatus("Ready", null, null);
+  }
 
-      switch (cmd) {
-          case "SET_BRIGHTNESS":
-              // Payload is 0-100, map to 0-42 (0x2A)
-              const val = Math.floor((payload as number / 100) * 0x2A);
-              packet = Protocol.getBrightnessPacket(val);
-              break;
-          case "TELEPROMPTER_INIT": // Also used for general text sending
-          case "SEND_TEXT":
-              // Payload is string
-              packet = Protocol.getTextPackets(payload as string);
+  public async sendCommand(type: string, payload?: any) {
+      if (this.connectionState !== ConnectionState.CONNECTED && !this.isSimulating) return;
+
+      let packets: Uint8Array[] = [];
+      let logMsg = "";
+
+      switch (type) {
+          case "TELEPROMPTER_INIT":
+              packets = Protocol.getTextPackets(payload);
+              logMsg = `[0x4E] Sending Text (${payload.length} chars)`;
               break;
           case "TELEPROMPTER_CLEAR":
-          case "CLEAR_SCREEN":
-              packet = Protocol.getExitPacket();
+              packets = [Protocol.getExitPacket()];
+              logMsg = `[0x18] Exit/Clear`;
               break;
-          case "START_VOICE_CAPTURE":
-              packet = Protocol.getMicEnablePacket(true);
-              break;
-          case "STOP_VOICE_CAPTURE":
-              packet = Protocol.getMicEnablePacket(false);
-              break;
-          case "UPDATE_WEATHER":
-              // payload: { icon: int, temp: int }
-              if (payload) {
-                  packet = Protocol.getSetTimeAndWeatherPacket(payload.icon, payload.temp);
+          case "SET_BRIGHTNESS":
+              packets = [Protocol.getBrightnessPacket(payload)];
+              logMsg = `[0x01] Set Brightness: ${payload}`;
+              if (this.vitals) { 
+                  this.vitals.brightness = payload; 
+                  this.notifyListeners();
               }
               break;
-          // For commands not yet implemented in real protocol or purely internal state
+          case "SET_SILENT_MODE":
+              packets = [Protocol.getSilentModePacket(payload)];
+              logMsg = `[0x03] Set Silent: ${payload}`;
+              if (this.vitals) {
+                  this.vitals.silentMode = payload;
+                  this.notifyListeners();
+              }
+              break;
+          case "DASHBOARD_MODE":
+              packets = [Protocol.getDashboardModePacket(payload)];
+              logMsg = `[0x06] Set Dashboard Mode: ${payload}`;
+              break;
+          case "CLEAR_SCREEN":
+               packets = [Protocol.getExitPacket()];
+               logMsg = "Clearing Display";
+               break;
           case "MUSIC_CONTROL":
-          case "CHECKLIST_OPEN":
-              // Fallback to just logging or mock state update for UI feedback
-              this.emitLog("TX", "WARN", `Command ${cmd} not fully implemented on Real Device, updating UI state only.`);
-              return this.handleMockCommand(cmd, payload, true); // Update state but don't log TX as if sent
+               this.emitLog("MUSIC", "INFO", `Control: ${payload}`);
+               // Mock state update
+               if (payload === "NEXT") this.musicState.track = "Another One Bites the Dust";
+               if (payload === "PREV") this.musicState.track = "Under Pressure";
+               if (payload === "PLAY" || payload === "PAUSE") this.musicState.isPlaying = (payload === "PLAY");
+               return; // No real packet for mock music yet
           default:
-              this.emitLog("TX", "WARN", `Unknown command for Real Device: ${cmd}`);
-              return "ERROR";
+              console.warn("Unknown command", type);
+              return;
       }
 
-      if (packet) {
-          if (Array.isArray(packet)) {
-              for (const p of packet) {
-                  await this.bleDriver.write(p);
-                  await new Promise(r => setTimeout(r, 50)); // Small delay between chunks
-              }
-          } else {
-              await this.bleDriver.write(packet as Uint8Array);
-          }
-          return "OK";
+      this.emitLog("TX", "INFO", logMsg);
+
+      if (this.isSimulating) return;
+
+      for (const p of packets) {
+          await this.driver.write(p);
+          // Small delay for BLE stack stability
+          await new Promise(r => setTimeout(r, 20)); 
       }
-      return "ERROR";
   }
 
-  // Mock Logic
-  private async handleMockCommand(cmd: string, payload?: any, silentLog: boolean = false): Promise<string> {
-    await new Promise(r => setTimeout(r, 150));
-    
-    if (!silentLog) {
-        // Basic logging for mock
-        if (cmd === "SET_BRIGHTNESS") {
-            const val = Math.floor((payload as number / 100) * 0x2A);
-            const hexVal = val.toString(16).padStart(2, '0').toUpperCase();
-            this.emitLog("TX", "INFO", `[01] ${hexVal} 00 (Set Brightness: ${payload}%)`);
-        } else if (cmd.includes("TEXT") || cmd.includes("INIT")) {
-             this.emitLog("TX", "INFO", `[0x4E] Sending Text Data...`);
-        } else {
-             this.emitLog("TX", "INFO", `[MOCK] ${cmd}`);
-        }
-    }
+  public async sendCommandRaw(packet: Uint8Array) {
+      if (this.connectionState === ConnectionState.CONNECTED) {
+          await this.driver.write(packet);
+      }
+  }
 
-    // State updates (shared between real/mock to keep UI in sync)
-    if (cmd === "SET_BRIGHTNESS") {
-      this.state.brightness = payload;
-      this.notifyListeners();
-    }
-    if (cmd === "SET_SILENT_MODE") {
-      this.state.silentMode = payload;
-      this.notifyListeners();
-    }
-    if (cmd === "MUSIC_CONTROL") {
-        const action = payload as 'PLAY' | 'PAUSE' | 'NEXT' | 'PREV';
-        if (action === 'PLAY') this.musicState.isPlaying = true;
-        if (action === 'PAUSE') this.musicState.isPlaying = false;
-        if (action === 'NEXT') this.musicState.track = "New Track " + Math.floor(Math.random() * 100);
-        if (action === 'PREV') this.musicState.track = "Prev Track " + Math.floor(Math.random() * 100);
-    }
-    if (cmd === "START_VOICE_CAPTURE" && this.isSimulating) {
-        setTimeout(() => {
-             this.emitVoiceData("Moncchichi play music");
-        }, 2000);
-    }
+  // --- Incoming Data Handling ---
 
-    return "OK";
+  private handleIncomingData(data: Uint8Array) {
+      const event = Protocol.parseTelemetry(data);
+      if (!event) return;
+
+      // Handshake Logic
+      if (event.type === 'ACK' && event.subType === 'MTU') {
+          this.setConnectionState(ConnectionState.CONNECTED);
+          this.emitStatus("Connected", null, null);
+          this.emitLog("BLE", "INFO", "Handshake: MTU Negotiated. Link Ready.");
+          // Request initial state
+          this.sendCommandRaw(Protocol.getFirmwareInfoPacket());
+      }
+
+      // Telemetry Updates
+      if (event.type === 'BATTERY' && event.subType === 'DETAILED') {
+           if (this.vitals && event.data.batteryPercent !== undefined) {
+               this.vitals.batteryPercent = event.data.batteryPercent;
+               this.notifyListeners();
+           }
+      }
+
+      if (event.type === 'STATE') {
+          if (this.vitals) {
+              if (event.data.uptimeSeconds !== undefined) this.vitals.uptimeSeconds = event.data.uptimeSeconds;
+              if (event.data.isWorn !== undefined) this.vitals.isWorn = event.data.isWorn;
+              if (event.data.inCase !== undefined) this.vitals.inCase = event.data.inCase;
+              this.notifyListeners();
+          }
+          if (event.subType === 'WORN') this.emitLog("SYS", "INFO", "Glasses Worn");
+          if (event.subType === 'NOT_WORN') this.emitLog("SYS", "INFO", "Glasses Removed");
+      }
+
+      if (event.type === 'DEBUG') {
+          this.emitLog("G1", "DEBUG", typeof event.data === 'string' ? event.data : JSON.stringify(event.data));
+      }
+  }
+
+  // --- Simulation Logic ---
+
+  private startSimulation() {
+      if (this.simInterval) clearInterval(this.simInterval);
+      this.simInterval = setInterval(() => {
+          if (this.connectionState === ConnectionState.CONNECTED && this.vitals) {
+              // Simulate battery drain
+              if (Math.random() > 0.95) {
+                  this.vitals.batteryPercent = Math.max(0, this.vitals.batteryPercent! - 1);
+                  this.notifyListeners();
+              }
+              // Simulate RSSI fluctuation
+              if (Math.random() > 0.7) {
+                  this.vitals.signalRssi = -50 - Math.floor(Math.random() * 20);
+                  this.notifyListeners();
+              }
+              // Simulate incoming heartbeat log
+              if (Math.random() > 0.9) {
+                  this.emitLog("RX", "INFO", "[6] 2B 69 0A 08 00 00"); // Heartbeat
+              }
+          }
+      }, 2000);
+  }
+
+  private stopSimulation() {
+      if (this.simInterval) {
+          clearInterval(this.simInterval);
+          this.simInterval = null;
+      }
+  }
+
+  // --- Debug Overrides ---
+  public debugSetConnectionState(state: ConnectionState) {
+      this.setConnectionState(state);
+      if (state === ConnectionState.CONNECTED) {
+          this.emitStatus("Connected (Forced)", null, null);
+      } else if (state === ConnectionState.DISCONNECTED) {
+          this.emitStatus("Ready", null, null);
+      }
+  }
+
+  public debugSetHeadsetState(state: HeadsetState) {
+     this.emitLog("DEBUG", "INFO", `Forced Headset State: ${state}`);
+  }
+
+  public debugTriggerError(msg: string) {
+      this.setConnectionState(ConnectionState.ERROR);
+      this.emitStatus("Simulated Error", msg, "Try restarting the simulator");
   }
 }
 

@@ -1,3 +1,4 @@
+
 export interface WeatherData {
     status: string;
     temp: number;
@@ -16,9 +17,8 @@ export const getWeather = async (): Promise<WeatherData> => {
                 rain: data.rain || 0
             };
         }
-        console.warn(`CheckWeather API returned status: ${res.status}`);
     } catch (e) {
-        console.warn("CheckWeather API unreachable, switching to fallback source.");
+        // Silently fail primary, move to secondary
     }
 
     // 2. Try Fallback Source: Open-Meteo (Singapore)
@@ -37,7 +37,7 @@ export const getWeather = async (): Promise<WeatherData> => {
         };
 
     } catch (e) {
-        console.error("All weather services failed", e);
+        console.warn("All weather services failed", e);
         // Return a safe fallback state to prevent UI crash
         return {
             status: 'Unavailable',

@@ -1,9 +1,10 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { ICONS } from '../constants';
-import { transportService, BusServiceData, BusStopLocation, ArrivalInfo, BusSchedule, MRTLine, MRTStation, TrainServiceAlert, StationCrowdData, StationAccessibility } from '../services/transportService';
+import { transportService, BusServiceData, BusStopLocation, ArrivalInfo, MRTLine, MRTStation, TrainServiceAlert, StationCrowdData, StationAccessibility } from '../services/transportService';
 import { mockService } from '../services/mockService';
-import { Accessibility, Search, Star, ChevronDown, ChevronUp, MapPin, RotateCcw, Edit2, Check, X, Calendar, TrainFront, BusFront, Users, Info, AlertTriangle, TrendingUp } from 'lucide-react';
+import { locationService } from '../services/locationService';
+import { Accessibility, Search, Star, ChevronDown, ChevronUp, MapPin, RotateCcw, Edit2, Check, BusFront, TrainFront, Users, AlertTriangle, Clock, Sparkles, Loader2, RefreshCw } from 'lucide-react';
 
 interface StopWithArrivals extends BusStopLocation {
     services: BusServiceData[];
@@ -11,7 +12,12 @@ interface StopWithArrivals extends BusStopLocation {
 
 type TransportMode = 'BUS' | 'TRAIN';
 
-const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
+interface TransportProps {
+  onBack: () => void;
+  onShowToast: (message: string, type: 'success' | 'error' | 'info') => void;
+}
+
+const Transport: React.FC<TransportProps> = ({ onBack, onShowToast }) => {
   // View State
   const [transportMode, setTransportMode] = useState<TransportMode>('BUS');
   const [viewMode, setViewMode] = useState<'NEARBY' | 'FAVORITES'>('NEARBY');
@@ -23,20 +29,19 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   const [locationName, setLocationName] = useState<string | null>(null);
   const [isLocating, setIsLocating] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [timeAgo, setTimeAgo] = useState<string>("Just now");
   
   // Favorites State
   const [favStopsData, setFavStopsData] = useState<StopWithArrivals[]>([]);
   const [favLoading, setFavLoading] = useState(false);
-  const [favoritesUpdated, setFavoritesUpdated] = useState(0);
-
+  
   // Train State
   const [mrtData, setMrtData] = useState<MRTLine[]>([]);
   const [expandedLines, setExpandedLines] = useState<Record<string, boolean>>({});
   const [trainAlerts, setTrainAlerts] = useState<TrainServiceAlert[]>([]);
-  const [alertLoading, setAlertLoading] = useState(false);
   
   // Train Station Details Cache
-  const [stationDetails, setStationDetails] = useState<Record<string, { crowd: StationCrowdData, lift: StationAccessibility }>>({});
+  const [stationDetails, setStationDetails] = useState<Record<string, { crowd: StationCrowdData | null, lift: StationAccessibility | null }>>({});
   const [expandedStations, setExpandedStations] = useState<Record<string, boolean>>({});
 
   // Manual Lookup State
@@ -45,15 +50,25 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState<string | null>(null);
   const [searchPerformed, setSearchPerformed] = useState(false);
+  const [manualStopName, setManualStopName] = useState<string | null>(null);
 
   // Expansion State (Bus)
   const [expandedStops, setExpandedStops] = useState<Record<string, boolean>>({});
 
-  // THEME HELPERS
-  // Returns classes based on active mode
-  const getThemeColor = () => transportMode === 'BUS' ? 'text-moncchichi-accent' : 'text-cyan-400';
-  const getBorderColor = () => transportMode === 'BUS' ? 'border-moncchichi-accent' : 'border-cyan-500';
-  const getBgActive = () => transportMode === 'BUS' ? 'bg-moncchichi-accent' : 'bg-cyan-500';
+  // --- Time Ago Timer ---
+  useEffect(() => {
+      const interval = setInterval(() => {
+          if (!lastUpdated) {
+              setTimeAgo("");
+              return;
+          }
+          const diff = Math.floor((Date.now() - lastUpdated) / 60000);
+          if (diff < 1) setTimeAgo("Just now");
+          else if (diff === 1) setTimeAgo("1 min ago");
+          else setTimeAgo(`${diff} mins ago`);
+      }, 10000);
+      return () => clearInterval(interval);
+  }, [lastUpdated]);
 
   const toggleExpand = (stopId: string) => {
       setExpandedStops(prev => ({
@@ -92,13 +107,11 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
       } else {
           transportService.addFavorite(stop);
       }
-      setFavoritesUpdated(Date.now());
       if (viewMode === 'FAVORITES') fetchFavoritesData();
   };
 
   const handleRename = (stopId: string, newName: string) => {
       transportService.renameFavorite(stopId, newName);
-      setFavoritesUpdated(Date.now());
       if (viewMode === 'FAVORITES') fetchFavoritesData();
       if (viewMode === 'NEARBY') {
           setNearbyStopsData(prev => prev.map(s => s.id === stopId ? { ...s, name: newName } : s));
@@ -114,6 +127,12 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     setManualError(null);
     setSearchPerformed(true);
     setManualArrivals([]); 
+
+    transportService.getBusStopInfo(stopId).then(info => {
+        if (info) setManualStopName(info.name);
+        else setManualStopName(null);
+    });
+
     try {
       const data = await transportService.getArrivals(stopId);
       if (!data.services || data.services.length === 0) {
@@ -121,15 +140,18 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
       } else {
           setManualArrivals(data.services);
           transportService.setDefaultStop(stopId);
+          setLastUpdated(Date.now());
+          setTimeAgo("Just now");
       }
     } catch (err) {
       setManualError("Unable to fetch live data. Check connection/ID.");
+      onShowToast("Network error. Verify internet connection.", "error");
     } finally {
       setManualLoading(false);
     }
   };
 
-  const fetchNearbyData = async (lat: number, lng: number) => {
+  const fetchNearbyData = useCallback(async (lat: number, lng: number) => {
     setNearbyLoading(true);
     try {
         const stops = await transportService.findNearestStops(lat, lng);
@@ -146,56 +168,58 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
         });
         setNearbyStopsData(enrichedStops);
         setLastUpdated(Date.now());
-    } catch (e) {
+        setTimeAgo("Just now");
+    } catch (e: any) {
         mockService.emitLog("TRANSPORT", "ERROR", "Failed to get nearby data");
+        onShowToast("Unable to retrieve nearby stops.", "error");
+        setNearbyStopsData([]); 
     } finally {
         setNearbyLoading(false);
     }
-  };
+  }, [onShowToast]);
 
   const fetchTrainAlerts = async () => {
-      setAlertLoading(true);
       try {
           const alerts = await transportService.getTrainServiceAlerts();
           setTrainAlerts(alerts);
       } catch (e) {
           // handled in service
-      } finally {
-          setAlertLoading(false);
       }
   };
 
-  const refreshLocation = () => {
+  const refreshLocation = async (force: boolean = false) => {
     setIsLocating(true);
-    if (navigator.geolocation) {
-        mockService.emitLog("GPS", "INFO", "Updating location...");
-        navigator.geolocation.getCurrentPosition(
-            async (pos) => {
-                const { latitude, longitude } = pos.coords;
-                setLocation({ lat: latitude, lng: longitude });
-                const address = await transportService.getAddress(latitude, longitude);
-                setLocationName(address);
-                fetchNearbyData(latitude, longitude);
-                setIsLocating(false);
-                mockService.emitLog("GPS", "INFO", `Location updated: ${address}`);
-            },
-            (err) => {
-                mockService.emitLog("GPS", "WARN", "Location denied. Using demo location.");
-                const demoLoc = { lat: 1.3040, lng: 103.8340 };
-                setLocation(demoLoc);
-                setLocationName("Orchard Stn/Lucky Plaza (Demo)");
-                fetchNearbyData(demoLoc.lat, demoLoc.lng);
-                setIsLocating(false);
-            },
-            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-        );
-    } else {
-        fetchManualBusData(busStopId);
+    if (!locationName) setLocationName("Locating...");
+
+    try {
+        const loc = force ? await locationService.refreshLocation() : await locationService.getLocation();
+        
+        setLocation({ lat: loc.lat, lng: loc.lng });
+        
+        if (loc.isDefault && force) {
+             onShowToast("GPS Signal weak. Using default location.", "info");
+        }
+
+        // Fetch Data
+        fetchNearbyData(loc.lat, loc.lng);
+        
+        // Reverse Geocode
+        try {
+            const address = await transportService.getAddress(loc.lat, loc.lng);
+            setLocationName(address);
+        } catch {
+            setLocationName(`${loc.lat.toFixed(4)}, ${loc.lng.toFixed(4)}`);
+        }
+
+    } catch (e) {
+        setLocationName("Location Error");
+        onShowToast("Location Service Unavailable", "error");
+    } finally {
         setIsLocating(false);
     }
   };
 
-  const fetchFavoritesData = async () => {
+  const fetchFavoritesData = useCallback(async () => {
       setFavLoading(true);
       try {
           const favs = transportService.getFavorites();
@@ -216,10 +240,23 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           );
           const results = await Promise.all(promises);
           setFavStopsData(results);
+          setLastUpdated(Date.now());
+          setTimeAgo("Just now");
       } catch (e) {
-          mockService.emitLog("TRANSPORT", "ERROR", "Failed to load favorites");
+          onShowToast("Failed to load favorite stops.", "error");
       } finally {
           setFavLoading(false);
+      }
+  }, [location, onShowToast]);
+
+  // Trigger Manual Refresh based on current view
+  const handleManualRefresh = () => {
+      if (viewMode === 'NEARBY' && location) {
+          fetchNearbyData(location.lat, location.lng);
+      } else if (viewMode === 'FAVORITES') {
+          fetchFavoritesData();
+      } else if (busStopId) {
+          fetchManualBusData(busStopId);
       }
   };
 
@@ -227,11 +264,10 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   useEffect(() => {
     refreshLocation();
     setMrtData(transportService.getMRTNetwork());
-    // Load initial train details to populate visible list (simulated batch load)
+    
+    // Preload details
     const allStations: string[] = [];
     transportService.getMRTNetwork().forEach(l => l.stations.forEach(s => allStations.push(s.code)));
-    
-    // Preload some random data for visuals (in real app we might lazy load)
     const initialDetails: Record<string, any> = {};
     allStations.forEach(code => {
         initialDetails[code] = {
@@ -247,21 +283,23 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
       if (viewMode === 'FAVORITES') {
           fetchFavoritesData();
       }
-  }, [viewMode, location]);
+  }, [viewMode, location, fetchFavoritesData]);
 
   const handleSendToHud = (bus: BusServiceData) => {
     const message = transportService.formatHudMessage(bus);
     mockService.sendCommand("CLEAR_SCREEN");
     mockService.emitLog("TX", "INFO", `[09] HUD_DRAW_TEXT: "${message.replace(/\n/g, '|')}"`);
     mockService.emitLog("TTS", "INFO", `Speaking: "${transportService.formatTtsMessage(bus)}"`);
+    onShowToast(`Sent Bus ${bus.serviceNo} to Glasses`, 'success');
   };
 
   const handleSendStationToHud = (line: MRTLine, station: MRTStation) => {
       const details = stationDetails[station.code];
-      const message = `${line.code} | ${station.name}\nCrowd: ${details?.crowd.current || 'N/A'}`;
+      const message = `${line.code} | ${station.name}\nCrowd: ${details?.crowd?.current || 'N/A'}`;
       mockService.sendCommand("CLEAR_SCREEN");
       mockService.emitLog("TX", "INFO", `[09] HUD_DRAW_TEXT: "${message.replace(/\n/g, '|')}"`);
-      mockService.emitLog("TTS", "INFO", `Speaking: "Station ${station.name} is currently at ${details?.crowd.current || 'unknown'} crowd level."`);
+      mockService.emitLog("TTS", "INFO", `Speaking: "Station ${station.name} is currently at ${details?.crowd?.current || 'unknown'} crowd level."`);
+      onShowToast(`Sent ${station.name} Info to Glasses`, 'success');
   };
 
   const handleOpenMaps = () => {
@@ -270,105 +308,99 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
       }
   };
 
-  const LoadIndicator: React.FC<{ arrival: ArrivalInfo }> = ({ arrival }) => {
-      const config = {
-          'SEA': { color: 'bg-moncchichi-success', text: 'Seats Available' },
-          'SDA': { color: 'bg-moncchichi-warning', text: 'Standing Available' },
-          'LSD': { color: 'bg-moncchichi-error', text: 'Limited Standing' },
-      }[arrival.load] || { color: 'bg-moncchichi-textSec', text: arrival.load };
+  const TimingBadge: React.FC<{ arrival: ArrivalInfo | null, label?: string }> = ({ arrival, label }) => {
+      if (!arrival) return (
+          <div className="flex flex-col items-center w-12 opacity-30">
+              <span className="text-[10px] text-moncchichi-textSec font-bold uppercase">{label}</span>
+              <span className="text-lg font-bold text-moncchichi-textSec">--</span>
+          </div>
+      );
+
+      const loadColors = {
+          'SEA': 'border-moncchichi-success text-moncchichi-success',
+          'SDA': 'border-moncchichi-warning text-moncchichi-warning',
+          'LSD': 'border-moncchichi-error text-moncchichi-error',
+      }[arrival.load] || 'border-moncchichi-textSec text-moncchichi-textSec';
 
       return (
-          <div className="flex items-center gap-1.5">
-             <div className={`w-2 h-2 rounded-full ${config.color}`} />
-             <span className="text-[9px] text-moncchichi-textSec font-medium uppercase tracking-tight whitespace-nowrap">{config.text}</span>
+          <div className="flex flex-col items-center w-12">
+              <span className="text-[9px] text-moncchichi-textSec font-bold uppercase mb-0.5">{label}</span>
+              <div className={`w-full h-8 flex items-center justify-center rounded border-b-2 bg-moncchichi-surfaceAlt ${loadColors}`}>
+                  <span className="text-sm font-bold text-moncchichi-text">
+                      {arrival.mins <= 0 ? 'Arr' : arrival.mins}
+                  </span>
+              </div>
+              <span className="text-[8px] text-moncchichi-textSec mt-0.5 scale-90">{arrival.type === 'DD' ? 'Double' : 'Single'}</span>
           </div>
       );
   };
 
-  const ArrivalItem: React.FC<{ bus: BusServiceData; schedule?: BusSchedule; showInsights?: boolean }> = ({ bus, schedule, showInsights }) => {
-      const dayType = transportService.getDayType();
-      const formatTime = (t?: string) => {
-          if (!t || t === '-') return '-';
-          if (t.includes(':')) return t;
-          return t.length === 4 ? `${t.slice(0,2)}:${t.slice(2)}` : t;
-      };
-      const getFirst = () => schedule ? formatTime(schedule.first[dayType]) : '-';
-      const getLast = () => schedule ? formatTime(schedule.last[dayType]) : '-';
+  const ArrivalItem: React.FC<{ bus: BusServiceData; stopName?: string; showInsights?: boolean }> = ({ bus, stopName, showInsights }) => {
+      const [aiInsight, setAiInsight] = useState<string | null>(bus.insight || null);
+      const [isAiLoading, setIsAiLoading] = useState(false);
+      
+      const interval = transportService.getBusInterval(bus);
+
+      useEffect(() => {
+          if (showInsights && !aiInsight && !isAiLoading && stopName) {
+              setIsAiLoading(true);
+              transportService.generateCrowdInsight(bus, stopName).then(text => {
+                  setAiInsight(text);
+                  setIsAiLoading(false);
+              });
+          }
+      }, [showInsights, aiInsight, stopName]);
 
       return (
         <div className="p-3 flex flex-col gap-2 hover:bg-moncchichi-surfaceAlt/30 transition-colors border-b border-moncchichi-border last:border-0 animate-in fade-in duration-300">
             <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4 flex-1">
-                    <div className="w-12 h-10 bg-moncchichi-surfaceAlt border border-moncchichi-border rounded-lg flex flex-col items-center justify-center shrink-0 shadow-sm">
-                        <span className="font-bold text-moncchichi-text text-sm leading-none">{bus.serviceNo}</span>
-                        <span className="text-[9px] text-moncchichi-textSec mt-0.5 scale-90">{bus.operator}</span>
-                    </div>
-                    <div className="flex-1">
-                        {bus.next ? (
-                            <div className="flex flex-col">
-                                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                                    <div className="flex items-baseline gap-1">
-                                        <span className="text-lg font-bold text-moncchichi-text">
-                                            {bus.next.mins <= 0 ? 'Arr' : bus.next.mins}
-                                        </span>
-                                        <span className="text-xs text-moncchichi-textSec">{bus.next.mins <= 0 ? '' : 'min'}</span>
-                                    </div>
-                                    <LoadIndicator arrival={bus.next} />
-                                    
-                                    {/* Explicit Bus Type */}
-                                    <span className="text-[9px] text-moncchichi-textSec border border-moncchichi-border px-1.5 rounded bg-moncchichi-bg/50 uppercase font-medium tracking-tight whitespace-nowrap">
-                                        {transportService.getBusTypeLabel(bus.next.type)}
-                                    </span>
-                                    
-                                    {bus.next.feature === 'WAB' && (
-                                        <Accessibility size={12} className="text-moncchichi-textSec" />
-                                    )}
-                                </div>
-
-                                {/* Subsequent Buses */}
-                                {bus.subsequent && (
-                                    <div className="flex items-center gap-2 mt-1 opacity-70">
-                                        <span className="text-xs text-moncchichi-textSec font-mono flex items-center gap-1">
-                                            Next: {bus.subsequent.mins}m 
-                                            <span className="text-[9px] border px-0.5 rounded border-moncchichi-border/50">{transportService.getBusTypeLabel(bus.subsequent.type)}</span>
-                                        </span>
-                                    </div>
-                                )}
-                            </div>
-                        ) : (
-                            <span className="text-xs text-moncchichi-textSec italic">Not In Service</span>
-                        )}
+                
+                {/* Service Info */}
+                <div className="flex items-center gap-3 mr-2">
+                    <div className="w-12 h-12 bg-moncchichi-surfaceAlt border border-moncchichi-border rounded-lg flex flex-col items-center justify-center shrink-0 shadow-sm">
+                        <span className="font-bold text-moncchichi-text text-base leading-none">{bus.serviceNo}</span>
+                        <span className="text-[9px] text-moncchichi-textSec mt-0.5 scale-90 uppercase">{bus.operator}</span>
                     </div>
                 </div>
-                <button 
-                    onClick={() => handleSendToHud(bus)}
-                    className="p-2 text-moncchichi-textSec hover:text-moncchichi-accent active:scale-95 transition-transform rounded-full hover:bg-moncchichi-surfaceAlt"
-                    title="Send to Glasses"
-                >
-                    {ICONS.Glasses}
-                </button>
+
+                {/* Timings Grid */}
+                <div className="flex-1 grid grid-cols-3 gap-2 justify-items-center">
+                    <TimingBadge arrival={bus.next} label="Next" />
+                    <TimingBadge arrival={bus.subsequent} label="2nd" />
+                    <TimingBadge arrival={bus.subsequent2} label="3rd" />
+                </div>
+
+                {/* Actions */}
+                <div className="flex flex-col gap-1 items-end ml-2">
+                    <button 
+                        onClick={() => handleSendToHud(bus)}
+                        className="p-2 text-moncchichi-textSec hover:text-moncchichi-accent active:scale-95 transition-transform rounded-full hover:bg-moncchichi-surfaceAlt"
+                        title="Send to Glasses"
+                    >
+                        {ICONS.Glasses}
+                    </button>
+                    {interval && (
+                        <span className="text-[9px] font-mono text-moncchichi-textSec bg-moncchichi-surfaceAlt px-1.5 py-0.5 rounded-full border border-moncchichi-border/50">
+                            ~{interval}
+                        </span>
+                    )}
+                </div>
             </div>
             
-            {/* Insights (Favorites Only) */}
+            {/* AI Crowd Insight (Favorites Only) */}
             {showInsights && (
-                <div className="mt-1 flex items-start gap-2 bg-moncchichi-accent/5 border border-moncchichi-accent/10 rounded p-2">
-                    <TrendingUp size={14} className="text-moncchichi-accent shrink-0 mt-0.5" />
-                    <span className="text-[10px] text-moncchichi-textSec leading-relaxed">
-                        <strong className="text-moncchichi-accent">Analysis:</strong> {transportService.getBusRouteInsight(bus.serviceNo)}
-                    </span>
-                </div>
-            )}
-
-            {schedule && (
-                <div className="flex items-center gap-4 pl-[60px] text-[10px] text-moncchichi-textSec opacity-80">
-                    <div className="flex items-center gap-1 bg-moncchichi-bg px-1.5 py-0.5 rounded border border-moncchichi-border/50">
-                        <Calendar size={10} />
-                        <span className="uppercase font-bold">{dayType === 'wd' ? 'Weekday' : (dayType === 'sat' ? 'Saturday' : 'Sun/PH')}</span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                        <span>First: <span className="text-moncchichi-text font-mono">{getFirst()}</span></span>
-                        <span>Last: <span className="text-moncchichi-text font-mono">{getLast()}</span></span>
-                    </div>
+                <div className="mt-1 flex items-start gap-2 bg-gradient-to-r from-moncchichi-accent/10 to-transparent border-l-2 border-moncchichi-accent rounded-r p-2">
+                    <Sparkles size={12} className="text-moncchichi-accent shrink-0 mt-0.5" />
+                    {isAiLoading ? (
+                        <div className="flex items-center gap-2">
+                             <Loader2 size={10} className="text-moncchichi-accent animate-spin" />
+                             <span className="text-[10px] text-moncchichi-textSec italic">Analyzing crowd levels...</span>
+                        </div>
+                    ) : (
+                        <span className="text-[10px] text-moncchichi-text leading-relaxed font-medium">
+                            {aiInsight || "Prediction unavailable."}
+                        </span>
+                    )}
                 </div>
             )}
         </div>
@@ -380,13 +412,6 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     const isFav = transportService.isFavorite(stop.id);
     const [isEditing, setIsEditing] = useState(false);
     const [editName, setEditName] = useState(stop.name);
-    const [schedules, setSchedules] = useState<Record<string, BusSchedule>>({});
-
-    useEffect(() => {
-        if (isExpanded && Object.keys(schedules).length === 0) {
-            transportService.getStopSchedule(stop.id).then(setSchedules);
-        }
-    }, [isExpanded, stop.id]);
 
     const handleSaveName = (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -459,8 +484,8 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                             <ArrivalItem 
                                 key={`${stop.id}-${bus.serviceNo}-${idx}`} 
                                 bus={bus} 
-                                schedule={schedules[bus.serviceNo]} 
-                                showInsights={viewMode === 'FAVORITES'} // Pass true only for Favorites view
+                                stopName={stop.name}
+                                showInsights={viewMode === 'FAVORITES'} 
                             />
                         ))
                     )}
@@ -470,32 +495,13 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     );
   };
 
-  // Manual Search Result Renderer
   const manualFav = transportService.getFavorite(busStopId);
-  const manualDisplayName = manualFav ? manualFav.name : `Stop ${busStopId}`;
-  const [manualSchedules, setManualSchedules] = useState<Record<string, BusSchedule>>({});
-  useEffect(() => {
-      if (searchPerformed && manualArrivals.length > 0) {
-          transportService.getStopSchedule(busStopId).then(setManualSchedules);
-      }
-  }, [searchPerformed, manualArrivals, busStopId]);
-
-  // Crowd Color Helper
-  const getCrowdColor = (level: string) => {
-      switch(level) {
-          case 'LOW': return 'bg-moncchichi-success text-moncchichi-bg';
-          case 'MODERATE': return 'bg-moncchichi-warning text-moncchichi-bg';
-          case 'HIGH': return 'bg-moncchichi-error text-white';
-          default: return 'bg-moncchichi-surfaceAlt text-moncchichi-textSec';
-      }
-  };
-
-  // === RENDER ===
+  const manualDisplayName = manualFav ? manualFav.name : (manualStopName || `Stop ${busStopId}`);
 
   return (
     <div className="flex flex-col h-full bg-moncchichi-bg transition-colors duration-500">
       {/* Header */}
-      <div className="px-4 py-3 border-b border-moncchichi-border bg-moncchichi-surface flex items-center gap-3 sticky top-0 z-20 shadow-sm z-30">
+      <div className="px-4 py-3 border-b border-moncchichi-border bg-moncchichi-surface flex items-center gap-3 sticky top-0 z-30 shadow-sm">
         <button onClick={onBack} className="p-2 -ml-2 text-moncchichi-textSec hover:text-moncchichi-text rounded-full hover:bg-moncchichi-surfaceAlt transition-colors">
           {ICONS.Back}
         </button>
@@ -527,7 +533,6 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
       {/* BUS VIEW */}
       {transportMode === 'BUS' && (
         <>
-            {/* Bus Tabs */}
             <div className="px-4 pt-4">
                 <div className="flex p-1 bg-moncchichi-surfaceAlt rounded-lg border border-moncchichi-border">
                     <button 
@@ -546,7 +551,6 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 space-y-6">
-                {/* Location Header (Nearby) */}
                 {viewMode === 'NEARBY' && (
                     <div className="bg-moncchichi-surface rounded-xl p-4 border border-moncchichi-border shadow-sm relative overflow-hidden">
                         <div className="absolute top-0 right-0 p-4 opacity-10 text-moncchichi-accent">{ICONS.MapPin}</div>
@@ -554,14 +558,14 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                             <div className="flex-1 pr-2">
                                 <div className="flex items-center gap-2 mb-1">
                                     <h3 className="text-xs font-medium text-moncchichi-textSec uppercase tracking-wider">Location</h3>
-                                    <button onClick={refreshLocation} disabled={isLocating} className="p-1 -my-1 text-moncchichi-textSec hover:text-moncchichi-text transition-colors rounded-full disabled:opacity-50">
+                                    <button onClick={() => refreshLocation(true)} disabled={isLocating} className="p-1 -my-1 text-moncchichi-textSec hover:text-moncchichi-text transition-colors rounded-full disabled:opacity-50">
                                         <RotateCcw size={12} className={isLocating ? "animate-spin" : ""} />
                                     </button>
                                 </div>
                                 {locationName ? (
                                     <div className="font-semibold text-sm text-moncchichi-text leading-tight">{locationName}</div>
                                 ) : (
-                                    <div className="text-sm text-moncchichi-textSec italic">{isLocating ? "Locating address..." : "Location unavailable"}</div>
+                                    <div className="text-sm text-moncchichi-textSec italic">{isLocating ? "Locating..." : "Location unavailable"}</div>
                                 )}
                             </div>
                             <button onClick={handleOpenMaps} disabled={!location} className="flex items-center gap-2 px-3 py-2 bg-moncchichi-surfaceAlt hover:bg-moncchichi-border rounded-lg border border-moncchichi-border text-xs font-bold transition-colors text-blue-400 shrink-0">
@@ -571,28 +575,63 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                     </div>
                 )}
 
-                {/* Content Switching */}
                 {viewMode === 'NEARBY' ? (
                     <>
-                        {nearbyStopsData.length > 0 ? (
-                            <div className="space-y-3 animate-in slide-in-from-bottom-4 duration-500">
-                                <div className="flex justify-between items-end px-1">
-                                    <h3 className="text-xs font-medium text-moncchichi-textSec uppercase tracking-wider">Nearby Stops</h3>
-                                    <span className="text-[10px] text-moncchichi-textSec">{lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : ''}</span>
-                                </div>
-                                {nearbyStopsData.map((stop) => <BusStopCard key={stop.id} stop={stop} />)}
-                            </div>
+                        {isLocating && nearbyStopsData.length === 0 ? (
+                             <div className="flex flex-col items-center justify-center py-8 opacity-70">
+                                 <div className="w-6 h-6 border-2 border-moncchichi-accent border-t-transparent rounded-full animate-spin mb-2" />
+                                 <span className="text-xs text-moncchichi-accent font-bold">Scanning...</span>
+                             </div>
                         ) : (
-                            !nearbyLoading && <div className="text-center py-8 text-moncchichi-textSec opacity-60"><p>No nearby stops found.</p></div>
+                             nearbyStopsData.length > 0 && (
+                                <div className="space-y-3 animate-in slide-in-from-bottom-4 duration-500">
+                                    <div className="flex justify-between items-center px-1">
+                                        <h3 className="text-xs font-medium text-moncchichi-textSec uppercase tracking-wider">Nearby Stops</h3>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-[10px] text-moncchichi-textSec font-medium opacity-80">
+                                                Updated {timeAgo}
+                                            </span>
+                                            <button 
+                                                onClick={handleManualRefresh} 
+                                                disabled={nearbyLoading}
+                                                className="p-1.5 bg-moncchichi-surfaceAlt rounded-full border border-moncchichi-border text-moncchichi-textSec hover:text-moncchichi-text active:scale-90 transition-all"
+                                            >
+                                                <RefreshCw size={10} className={nearbyLoading ? "animate-spin" : ""} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    {nearbyStopsData.map((stop) => <BusStopCard key={stop.id} stop={stop} />)}
+                                </div>
+                            )
+                        )}
+                        {!isLocating && nearbyStopsData.length === 0 && (
+                             <div className="flex flex-col items-center justify-center py-8 text-moncchichi-textSec opacity-50 gap-2">
+                                <BusFront size={24} />
+                                <span className="text-xs">No stops nearby.</span>
+                             </div>
                         )}
                     </>
                 ) : (
                     <>
                         {favStopsData.length > 0 ? (
                             <div className="space-y-3 animate-in slide-in-from-bottom-4 duration-500">
-                                <div className="flex justify-between items-end px-1">
-                                    <h3 className="text-xs font-medium text-moncchichi-textSec uppercase tracking-wider">Pinned Stops</h3>
-                                    {location && <span className="text-[10px] text-moncchichi-success">Sorted by distance</span>}
+                                <div className="flex justify-between items-center px-1">
+                                    <div className="flex items-baseline gap-2">
+                                        <h3 className="text-xs font-medium text-moncchichi-textSec uppercase tracking-wider">Pinned Stops</h3>
+                                        {location && <span className="text-[9px] text-moncchichi-success bg-moncchichi-success/10 px-1.5 rounded border border-moncchichi-success/20">Sorted by distance</span>}
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-[10px] text-moncchichi-textSec font-medium opacity-80">
+                                            Updated {timeAgo}
+                                        </span>
+                                        <button 
+                                            onClick={handleManualRefresh} 
+                                            disabled={favLoading}
+                                            className="p-1.5 bg-moncchichi-surfaceAlt rounded-full border border-moncchichi-border text-moncchichi-textSec hover:text-moncchichi-text active:scale-90 transition-all"
+                                        >
+                                            <RefreshCw size={10} className={favLoading ? "animate-spin" : ""} />
+                                        </button>
+                                    </div>
                                 </div>
                                 {favStopsData.map((stop) => <BusStopCard key={stop.id} stop={stop} />)}
                             </div>
@@ -640,7 +679,9 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                                 </button>
                             </div>
                             <div className="rounded-lg border border-moncchichi-border overflow-hidden bg-moncchichi-surfaceAlt/20">
-                                {manualArrivals.map((bus, idx) => <ArrivalItem key={`manual-${bus.serviceNo}-${idx}`} bus={bus} schedule={manualSchedules[bus.serviceNo]} showInsights={false} />)}
+                                {manualArrivals.map((bus, idx) => (
+                                    <ArrivalItem key={`manual-${bus.serviceNo}-${idx}`} bus={bus} showInsights={false} />
+                                ))}
                             </div>
                         </div>
                     )}
@@ -652,142 +693,99 @@ const Transport: React.FC<{ onBack: () => void }> = ({ onBack }) => {
 
       {/* TRAIN VIEW */}
       {transportMode === 'TRAIN' && (
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 animate-in slide-in-from-right-4 duration-300">
-              {/* Network Ticker */}
-              <div className={`rounded-lg p-3 border flex items-start gap-3 shadow-sm ${trainAlerts.length > 0 ? 'bg-moncchichi-error/10 border-moncchichi-error/30' : 'bg-moncchichi-surface border-cyan-500/20'}`}>
-                   <div className={`mt-0.5 ${trainAlerts.length > 0 ? 'text-moncchichi-error' : 'text-cyan-400'}`}>
-                       {trainAlerts.length > 0 ? <AlertTriangle size={16} /> : <Check size={16} />}
-                   </div>
-                   <div className="flex-1">
-                       <h4 className={`text-xs font-bold uppercase tracking-wider mb-1 ${trainAlerts.length > 0 ? 'text-moncchichi-error' : 'text-cyan-400'}`}>
-                           {trainAlerts.length > 0 ? 'Service Alert' : 'Network Normal'}
-                       </h4>
-                       <p className="text-xs text-moncchichi-text leading-relaxed">
-                           {trainAlerts.length > 0 
-                                ? trainAlerts.map(a => a.Message).join(' | ') 
-                                : 'All train lines are operating normally. Lift maintenance scheduled for selected stations.'}
-                       </p>
-                   </div>
-              </div>
+           <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {trainAlerts.length > 0 ? (
+                  <div className="bg-moncchichi-error/10 border border-moncchichi-error/30 rounded-xl p-4 animate-in slide-in-from-top-2">
+                      <h3 className="text-sm font-bold text-moncchichi-error flex items-center gap-2 mb-2">
+                          <AlertTriangle size={16} /> Service Disruptions
+                      </h3>
+                      <div className="space-y-2">
+                          {trainAlerts.map((alert, idx) => (
+                              <div key={idx} className="text-xs text-moncchichi-text leading-relaxed">
+                                  <span className="font-bold">{alert.Line} ({alert.Direction}):</span> {alert.Message}
+                              </div>
+                          ))}
+                      </div>
+                  </div>
+              ) : (
+                  <div className="bg-moncchichi-success/5 border border-moncchichi-success/20 rounded-xl p-3 flex items-center gap-3">
+                      <div className="p-1.5 bg-moncchichi-success/10 rounded-full text-moncchichi-success"><Check size={14} /></div>
+                      <span className="text-xs text-moncchichi-text opacity-90">All train services are running normally.</span>
+                  </div>
+              )}
 
-              <div className="flex justify-between items-end px-1 pt-2">
-                  <h3 className="text-xs font-medium text-cyan-500 uppercase tracking-wider">Lines & Stations</h3>
-                  <span className="text-[10px] text-moncchichi-textSec">LTA DataMall</span>
-              </div>
-              
-              {mrtData.map((line) => {
-                  const isLineExpanded = expandedLines[line.code];
-                  return (
-                      <div key={line.code} className="bg-moncchichi-surface rounded-xl border border-moncchichi-border overflow-hidden shadow-sm">
+              <div className="space-y-3">
+                  {mrtData.map(line => (
+                      <div key={line.code} className="bg-moncchichi-surface border border-moncchichi-border rounded-xl overflow-hidden">
                           <div 
-                              className="p-4 flex items-center justify-between cursor-pointer bg-moncchichi-surfaceAlt/30 hover:bg-moncchichi-surfaceAlt/50 transition-colors"
+                              className="p-3 flex items-center justify-between cursor-pointer hover:bg-moncchichi-surfaceAlt/50 transition-colors"
                               onClick={() => toggleLineExpand(line.code)}
-                              style={{ borderLeft: `4px solid ${line.color}` }}
                           >
-                              <div>
-                                  <div className="text-sm font-bold text-moncchichi-text">{line.name}</div>
-                                  <div className="text-[10px] text-moncchichi-textSec font-mono">{line.code} • {line.stations.length} Stations</div>
-                              </div>
-                              <div className={`text-moncchichi-textSec transition-transform duration-300 ${isLineExpanded ? 'rotate-180' : ''}`}>
-                                  <ChevronDown size={18} />
-                              </div>
+                               <div className="flex items-center gap-3">
+                                   <div className="w-1.5 h-8 rounded-full" style={{ backgroundColor: line.color }} />
+                                   <div>
+                                       <div className="font-bold text-sm">{line.name}</div>
+                                       <div className="text-[10px] text-moncchichi-textSec">{line.stations.length} Stations</div>
+                                   </div>
+                               </div>
+                               <div className="text-moncchichi-textSec">
+                                   {expandedLines[line.code] ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                               </div>
                           </div>
-
-                          {isLineExpanded && (
-                              <div className="border-t border-moncchichi-border">
-                                  {line.stations.map((station) => {
+                          
+                          {expandedLines[line.code] && (
+                              <div className="border-t border-moncchichi-border bg-moncchichi-surfaceAlt/10">
+                                  {line.stations.map((station, idx) => {
                                       const details = stationDetails[station.code];
-                                      const isStationExpanded = expandedStations[station.code];
+                                      const isStationExpanded = !!expandedStations[station.code];
                                       
                                       return (
-                                      <div key={station.code} className="border-b border-moncchichi-border/50 last:border-0">
-                                          <div 
-                                            className="px-4 py-3 flex justify-between items-center hover:bg-moncchichi-surfaceAlt/20 cursor-pointer"
-                                            onClick={() => toggleStationExpand(station.code)}
-                                          >
-                                              <div className="flex items-center gap-3 flex-1 min-w-0">
-                                                  <div 
-                                                    className="w-8 h-5 rounded flex items-center justify-center text-[9px] font-bold text-white shadow-sm shrink-0"
-                                                    style={{ backgroundColor: line.color }}
-                                                  >
-                                                      {station.code}
-                                                  </div>
-                                                  <div className="flex flex-col min-w-0">
-                                                      <span className="text-sm text-moncchichi-text opacity-90 truncate">{station.name}</span>
-                                                      {details?.lift.liftMaintenance && (
-                                                          <div className="flex items-center gap-1 text-[9px] text-moncchichi-warning mt-0.5">
-                                                              <Accessibility size={9} />
-                                                              <span>Lift Maint.</span>
-                                                          </div>
-                                                      )}
-                                                  </div>
-                                              </div>
-                                              
-                                              <div className="flex items-center gap-3 shrink-0">
-                                                  {/* Crowd Pill */}
-                                                  {details && (
-                                                      <div className={`px-2 py-1 rounded text-[9px] font-bold uppercase tracking-tight ${getCrowdColor(details.crowd.current)}`}>
-                                                          {details.crowd.current}
-                                                      </div>
-                                                  )}
-                                                  <button 
-                                                    onClick={(e) => { e.stopPropagation(); handleSendStationToHud(line, station); }}
-                                                    className="p-2 text-cyan-500/50 hover:text-cyan-400 active:scale-95 transition-all rounded-full hover:bg-cyan-500/10"
-                                                  >
-                                                      {ICONS.Glasses}
-                                                  </button>
-                                              </div>
-                                          </div>
-
-                                          {/* Station Details (Crowd Forecast) */}
-                                          {isStationExpanded && details && (
-                                              <div className="bg-moncchichi-bg/50 p-3 animate-in slide-in-from-top-2">
-                                                  <div className="flex items-center gap-2 mb-2">
-                                                      <Users size={12} className="text-moncchichi-textSec" />
-                                                      <span className="text-[10px] font-bold text-moncchichi-textSec uppercase">Crowd Forecast</span>
+                                          <div key={station.code} className="border-b border-moncchichi-border/50 last:border-0">
+                                              <div 
+                                                  className="p-3 pl-6 flex items-center justify-between cursor-pointer hover:bg-moncchichi-surfaceAlt/30"
+                                                  onClick={() => toggleStationExpand(station.code)}
+                                              >
+                                                  <div className="flex items-center gap-3">
+                                                      <span className="font-mono text-[10px] text-moncchichi-textSec w-8">{station.code}</span>
+                                                      <span className="text-sm font-medium">{station.name}</span>
                                                   </div>
                                                   
-                                                  {/* Timeline */}
-                                                  <div className="flex justify-between gap-1">
-                                                      {details.crowd.forecast.map((item, i) => (
-                                                          <div key={i} className="flex-1 flex flex-col items-center gap-1">
-                                                              <div className={`w-full h-1.5 rounded-full ${getCrowdColor(item.level)} opacity-80`}></div>
-                                                              <span className="text-[9px] text-moncchichi-textSec font-mono">{item.time}</span>
-                                                          </div>
-                                                      ))}
+                                                  <div className="flex items-center gap-2">
+                                                       {details?.crowd?.current && (
+                                                           <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                                                               details.crowd.current === 'HIGH' ? 'bg-moncchichi-error text-moncchichi-bg' : 
+                                                               (details.crowd.current === 'MODERATE' ? 'bg-moncchichi-warning text-moncchichi-bg' : 'bg-moncchichi-success text-moncchichi-bg')
+                                                           }`}>
+                                                               {details.crowd.current}
+                                                           </span>
+                                                       )}
+                                                       <button 
+                                                           onClick={(e) => { e.stopPropagation(); handleSendStationToHud(line, station); }}
+                                                           className="p-1.5 text-moncchichi-textSec hover:text-moncchichi-accent transition-colors"
+                                                       >
+                                                           {ICONS.Glasses}
+                                                       </button>
                                                   </div>
-
-                                                  {/* Recommendation */}
-                                                  <div className="mt-3 p-2 rounded bg-moncchichi-surface border border-moncchichi-border flex items-start gap-2">
-                                                      <Info size={12} className="text-cyan-400 mt-0.5 shrink-0" />
-                                                      <div className="text-[10px] text-moncchichi-text leading-tight">
-                                                          {details.crowd.trend === 'RISING' 
-                                                            ? 'Crowds are building up. Recommend travelling now.' 
-                                                            : (details.crowd.trend === 'FALLING' ? 'Crowds easing soon. Consider waiting 30 mins.' : 'Traffic is stable.')}
-                                                      </div>
-                                                  </div>
-
-                                                  {/* Access Alerts */}
-                                                  {details.lift.liftMaintenance && (
-                                                      <div className="mt-2 p-2 rounded bg-moncchichi-warning/10 border border-moncchichi-warning/30 flex items-start gap-2">
-                                                          <AlertTriangle size={12} className="text-moncchichi-warning mt-0.5 shrink-0" />
-                                                          <div className="text-[10px] text-moncchichi-warning leading-tight">
-                                                              {details.lift.details}
-                                                          </div>
-                                                      </div>
-                                                  )}
                                               </div>
-                                          )}
-                                      </div>
+                                              {isStationExpanded && (
+                                                  <div className="px-6 pb-3 pt-0 text-xs text-moncchichi-textSec space-y-1">
+                                                       <div className="flex items-center gap-2">
+                                                           <Users size={12} /> Crowd Level: {details?.crowd?.current || 'N/A'}
+                                                       </div>
+                                                       <div className="flex items-center gap-2">
+                                                           <Accessibility size={12} /> Lift Status: {details?.lift?.liftMaintenance ? 'Maintenance' : 'Operational'}
+                                                       </div>
+                                                  </div>
+                                              )}
+                                          </div>
                                       );
                                   })}
                               </div>
                           )}
                       </div>
-                  );
-              })}
-              <div className="h-8" />
-          </div>
+                  ))}
+              </div>
+           </div>
       )}
     </div>
   );

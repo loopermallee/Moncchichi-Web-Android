@@ -64,6 +64,8 @@ export class BleDriver {
   private server: BluetoothRemoteGATTServer | null = null;
   private rxChar: BluetoothRemoteGATTCharacteristic | null = null; // Write to this
   private txChar: BluetoothRemoteGATTCharacteristic | null = null; // Read from this
+  
+  private onDataCallback: ((data: Uint8Array) => void) | null = null;
 
   // Native Bridge State
   private androidBridge: AndroidBridge | null = null;
@@ -77,6 +79,10 @@ export class BleDriver {
           this.logCallback('INFO', 'SYS', 'Android Native Bridge detected');
           this.setupNativeListeners();
       }
+  }
+
+  public setDataCallback(cb: (data: Uint8Array) => void) {
+      this.onDataCallback = cb;
   }
 
   private setupNativeListeners() {
@@ -109,7 +115,7 @@ export class BleDriver {
               const data = base64ToBytes(base64Data);
               const hex = Array.from(data).map(b => b.toString(16).padStart(2,'0')).join(' ').toUpperCase();
               this.logCallback('INFO', 'RX', `[${data.length}] ${hex}`);
-              // Note: Real data parsing would happen here or emit an event to the main service
+              if (this.onDataCallback) this.onDataCallback(data);
           } catch (e) {
               console.error("Failed to parse native BLE data", e);
           }
@@ -143,45 +149,69 @@ export class BleDriver {
 
     // 2. Web Bluetooth Path
     if (!(navigator as any).bluetooth) {
-      this.logCallback('ERROR', 'BLE', 'Web Bluetooth not supported');
-      return false;
+      const msg = 'Web Bluetooth not supported in this browser.';
+      this.logCallback('ERROR', 'BLE', msg);
+      throw new Error("WebBluetoothUnsupported");
     }
 
     try {
-      this.logCallback('INFO', 'BLE', 'Requesting device (G1_...)...');
-      // G1 Glasses typically advertise with name starting with "G1"
+      this.logCallback('INFO', 'BLE', 'Requesting User Selection (Check Popup)...');
+      
+      // Using acceptAllDevices allows the user to see all BLE devices in the browser picker
+      // and select the correct one manually, avoiding issues with device name filtering.
       this.device = await (navigator as any).bluetooth.requestDevice({
-        filters: [{ namePrefix: 'G1' }],
+        acceptAllDevices: true,
         optionalServices: [BLE_UUIDS.SERVICE]
       });
 
-      if (!this.device) return false;
+      if (!this.device) {
+          throw new Error("NoDeviceSelected");
+      }
       
       this.device.addEventListener('gattserverdisconnected', this.onDisconnected.bind(this));
 
-      this.logCallback('INFO', 'BLE', `Connecting to ${this.device.name}...`);
+      this.logCallback('INFO', 'BLE', `Connecting to ${this.device.name || 'Device'}...`);
       if (this.device.gatt) {
         this.server = await this.device.gatt.connect();
       } else {
         throw new Error("GATT server unavailable");
       }
 
-      this.logCallback('INFO', 'BLE', 'Getting Service...');
+      this.logCallback('INFO', 'BLE', 'Discovering Services...');
       const service = await this.server.getPrimaryService(BLE_UUIDS.SERVICE);
 
-      this.logCallback('INFO', 'BLE', 'Getting Characteristics...');
+      this.logCallback('INFO', 'BLE', 'Discovering Characteristics...');
       this.rxChar = await service.getCharacteristic(BLE_UUIDS.RX_CHAR);
       this.txChar = await service.getCharacteristic(BLE_UUIDS.TX_CHAR);
 
       await this.txChar.startNotifications();
       this.txChar.addEventListener('characteristicvaluechanged', this.handleNotifications.bind(this));
 
-      this.logCallback('INFO', 'BLE', 'Connected & Subscribed');
+      this.logCallback('INFO', 'BLE', 'Subscribed to G1 Data Stream');
       return true;
 
     } catch (e: any) {
-      this.logCallback('ERROR', 'BLE', `Connection failed: ${e.message}`);
-      return false;
+      const errMsg = e.message || e.toString();
+      
+      // Specific Error Classification for UI Troubleshooting
+      if (e.name === 'NotFoundError' || errMsg.includes('cancelled')) {
+          this.logCallback('WARN', 'BLE', 'User cancelled selection.');
+          throw new Error("UserCancelled");
+      }
+      if (e.name === 'SecurityError') {
+           this.logCallback('ERROR', 'BLE', 'Security: Permission denied.');
+           throw new Error("SecurityError");
+      }
+      if (e.name === 'NetworkError' || errMsg.includes('NetworkError') || errMsg.includes('GATT')) {
+           this.logCallback('ERROR', 'BLE', 'Network/GATT Error: Device busy or out of range.');
+           throw new Error("NetworkError");
+      }
+      if (e.name === 'NotSupportedError') {
+          throw new Error("NotSupportedError");
+      }
+
+      this.logCallback('ERROR', 'BLE', `Connection failed: ${errMsg}`);
+      throw e;
     }
   }
 
@@ -189,19 +219,19 @@ export class BleDriver {
     // Native Path
     if (this.androidBridge) {
         this.androidBridge.disconnect();
-        // We assume disconnection callback will fire, but we set state immediately for UI responsiveness
         this.nativeConnected = false;
         return;
     }
 
     // Web Bluetooth Path
     if (this.device && this.device.gatt?.connected) {
+      this.logCallback('INFO', 'BLE', 'Disconnecting Web Bluetooth...');
       this.device.gatt.disconnect();
     }
   }
 
   private onDisconnected() {
-    this.logCallback('WARN', 'BLE', 'Device Disconnected');
+    this.logCallback('WARN', 'BLE', 'Device Disconnected (Event)');
     this.rxChar = null;
     this.txChar = null;
     this.server = null;
@@ -212,6 +242,7 @@ export class BleDriver {
     const arr = new Uint8Array(value.buffer);
     const hex = Array.from(arr).map(b => b.toString(16).padStart(2,'0')).join(' ').toUpperCase();
     this.logCallback('INFO', 'RX', `[${arr.length}] ${hex}`);
+    if (this.onDataCallback) this.onDataCallback(arr);
   }
 
   public async write(data: Uint8Array): Promise<boolean> {
@@ -224,29 +255,26 @@ export class BleDriver {
         try {
             const base64 = bytesToBase64(data);
             this.androidBridge.write(base64);
-            
-            const hex = Array.from(data).map(b => b.toString(16).padStart(2,'0')).join(' ').toUpperCase();
-            this.logCallback('INFO', 'TX', `[${data.length}] ${hex}`);
             return true;
-        } catch (e: any) {
-            this.logCallback('ERROR', 'BLE', `Native Write failed: ${e.message}`);
-            return false;
+        } catch (e) {
+             this.logCallback('ERROR', 'BLE', 'Native Write Failed');
+             return false;
         }
     }
 
     // Web Bluetooth Path
-    if (!this.rxChar) {
-      this.logCallback('ERROR', 'BLE', 'Cannot write: No characteristic');
-      return false;
+    if (this.rxChar) {
+        try {
+            // WriteWithoutResponse is generally preferred for throughput
+            await this.rxChar.writeValueWithoutResponse(data);
+            return true;
+        } catch (e: any) {
+            this.logCallback('ERROR', 'TX', `Write Error: ${e.message}`);
+            return false;
+        }
     }
-    try {
-      await this.rxChar.writeValueWithoutResponse(data);
-      const hex = Array.from(data).map(b => b.toString(16).padStart(2,'0')).join(' ').toUpperCase();
-      this.logCallback('INFO', 'TX', `[${data.length}] ${hex}`);
-      return true;
-    } catch (e: any) {
-      this.logCallback('ERROR', 'BLE', `Write failed: ${e.message}`);
-      return false;
-    }
+    
+    this.logCallback('WARN', 'BLE', 'Write skipped: No characteristic');
+    return false;
   }
 }

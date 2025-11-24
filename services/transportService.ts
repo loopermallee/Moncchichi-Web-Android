@@ -1,5 +1,6 @@
 
 import { mockService } from './mockService';
+import { GoogleGenAI } from "@google/genai";
 
 export interface ArrivalInfo {
   mins: number;
@@ -16,6 +17,7 @@ export interface BusServiceData {
   subsequent2: ArrivalInfo | null;
   stopName?: string;
   stopId?: string;
+  insight?: string; // AI Crowd Prediction
 }
 
 export interface BusStopData {
@@ -80,23 +82,13 @@ export interface StationAccessibility {
     details?: string;
 }
 
+// Using Arrivelah for Bus (CORS friendly)
 const BASE_URL = 'https://arrivelah2.busrouter.sg';
+// Using CORS Proxy for LTA DataMall (Direct calls block in browser)
+const PROXY_URL = 'https://corsproxy.io/?'; 
 const LTA_BASE_URL = 'https://datamall2.mytransport.sg/ltaodataservice';
 const LTA_API_KEY = 'BDSwMqU/RVyzCbvR0iAFng==';
 const STORAGE_KEY_FAV = 'moncchichi_fav_stops';
-
-// Mock Database of Stops (Orchard/City Area)
-const MOCK_STOPS: BusStopLocation[] = [
-    { id: '09048', name: 'Orchard Stn/Lucky Plaza', lat: 1.3040, lng: 103.8340 },
-    { id: '09038', name: 'Opp Orchard Stn/ION', lat: 1.3048, lng: 103.8317 },
-    { id: '09022', name: 'Tang Plaza', lat: 1.3055, lng: 103.8325 },
-    { id: '04168', name: 'Clarke Quay Stn', lat: 1.2885, lng: 103.8466 },
-    { id: '01012', name: 'Hotel Grand Pacific', lat: 1.2968, lng: 103.8524 },
-    { id: '04121', name: 'Hong Lim Park', lat: 1.2865, lng: 103.8460 },
-    { id: '14119', name: 'Opp ARC 380', lat: 1.3133, lng: 103.8606 },
-    { id: '05013', name: 'People\'s Pk Cplx', lat: 1.2848, lng: 103.8426 },
-    { id: '10009', name: 'VivoCity', lat: 1.2646, lng: 103.8233 },
-];
 
 const MRT_DATA: MRTLine[] = [
     {
@@ -177,7 +169,12 @@ const MRT_DATA: MRTLine[] = [
 
 class TransportService {
   private defaultStop = '09048'; // Orchard Stn
-  private crowdCache: Record<string, StationCrowdData> = {};
+  private allStopsCache: BusStopLocation[] = [];
+  private genAI: GoogleGenAI;
+
+  constructor() {
+      this.genAI = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  }
 
   getDefaultStop(): string {
     return this.defaultStop;
@@ -190,20 +187,21 @@ class TransportService {
   // --- BUS API ---
 
   async getArrivals(stopId: string): Promise<BusStopData> {
-    // Primary: Try LTA DataMall Official API
+    // Strategy: Try LTA directly via CORS Proxy first using the User's Key (Live Data Priority)
     try {
         const headers = new Headers();
         headers.append('AccountKey', LTA_API_KEY);
         headers.append('accept', 'application/json');
 
-        const res = await fetch(`${LTA_BASE_URL}/BusArrivalv2?BusStopCode=${stopId}`, {
+        const proxyUrl = `${PROXY_URL}${encodeURIComponent(`${LTA_BASE_URL}/BusArrivalv2?BusStopCode=${stopId}`)}`;
+        
+        const res = await fetch(proxyUrl, {
             method: 'GET',
-            headers: headers
+            headers: headers,
+            cache: 'no-store'
         });
 
-        if (!res.ok) {
-            throw new Error(`LTA API returned status: ${res.status}`);
-        }
+        if (!res.ok) throw new Error(`LTA API returned status: ${res.status}`);
         
         const data = await res.json();
         
@@ -220,30 +218,28 @@ class TransportService {
             id: stopId,
             services: services
         };
-
-    } catch (error) {
-        // Fallback: Arrivelah (Legacy / Proxy)
-        // Essential for environments where direct LTA calls are CORS-blocked (like browsers)
-        // console.warn("LTA Bus API failed (likely CORS), using fallback.", error);
+    } catch (ltaError) {
+        // Fallback: Use Arrivelah2 (Official Mirror) if LTA direct fails
+        console.warn("LTA API failed, trying fallback...", ltaError);
         try {
-            const response = await fetch(`${BASE_URL}/?id=${stopId}`);
-            if (!response.ok) throw new Error('Fallback network response was not ok');
-            const data = await response.json();
-            
-            return {
-                id: stopId,
-                services: data.services.map((s: any) => ({
-                    serviceNo: s.no,
-                    operator: s.operator,
-                    next: s.next,
-                    subsequent: s.next2,
-                    subsequent2: s.next3,
-                    stopId: stopId
-                }))
-            };
+             const response = await fetch(`${BASE_URL}/?id=${stopId}`);
+             if (!response.ok) throw new Error('Arrivelah API failed');
+             const data = await response.json();
+             
+             return {
+                 id: stopId,
+                 services: data.services.map((s: any) => ({
+                     serviceNo: s.no,
+                     operator: s.operator,
+                     next: s.next,
+                     subsequent: s.next2,
+                     subsequent2: s.next3,
+                     stopId: stopId
+                 }))
+             };
         } catch (fbError) {
-            mockService.emitLog("TRANSPORT", "ERROR", `API Error for ${stopId}`);
-            throw error; // Throw the original error to indicate primary failure
+             console.error("All Bus APIs failed for", stopId);
+             throw ltaError; // Throw original error for debugging
         }
     }
   }
@@ -256,23 +252,183 @@ class TransportService {
       const mins = Math.floor((arrivalTime - now) / 60000);
 
       return {
-          mins: mins, // UI handles values <= 0 as "Arr"
+          mins: mins,
           load: bus.Load,
           type: bus.Type,
           feature: bus.Feature
       };
   }
 
+  // Load all 5000+ bus stops for true geolocation searching
+  async fetchAllBusStops(): Promise<BusStopLocation[]> {
+      if (this.allStopsCache.length > 0) return this.allStopsCache;
+
+      // Strategy:
+      // 1. Try downloading static JSON from various sources/proxies (Fastest)
+      // 2. If all static sources fail, fall back to LTA DataMall API loop (Robust but slower)
+
+      const staticUrls = [
+          // 1. Direct access (Fastest if CORS allows)
+          'https://busrouter.sg/data/2/bus-stops.json', 
+          // 2. Via CorsProxy (Primary)
+          `${PROXY_URL}${encodeURIComponent('https://busrouter.sg/data/2/bus-stops.json')}`,
+          // 3. Via AllOrigins (Secondary Proxy)
+          `https://api.allorigins.win/raw?url=${encodeURIComponent('https://busrouter.sg/data/2/bus-stops.json')}`,
+          // 4. GitHub Raw via Proxy
+          `${PROXY_URL}${encodeURIComponent('https://raw.githubusercontent.com/cheeaun/busrouter-sg/master/data/2/bus-stops.json')}`
+      ];
+
+      for (const url of staticUrls) {
+          try {
+              mockService.emitLog("TRANSPORT", "INFO", `Fetching DB: ${url.substring(0, 30)}...`);
+              const response = await fetch(url);
+              if (response.ok) {
+                  const data = await response.json();
+                  return this.processBusStopData(data);
+              }
+          } catch (e) {
+              console.warn(`Bus DB Source Failed: ${url}`);
+          }
+      }
+      
+      // Fallback to LTA DataMall API (Official Source)
+      // This handles the case where all static file mirrors are blocked/down
+      try {
+          mockService.emitLog("TRANSPORT", "WARN", "Static DB failed. Switching to LTA API (Fallback)...");
+          const ltaStops = await this.fetchStopsFromLTA();
+          this.allStopsCache = ltaStops;
+          return ltaStops;
+      } catch (e) {
+          mockService.emitLog("TRANSPORT", "ERROR", "Critical: All Bus DB sources failed.");
+          throw new Error("Failed to fetch bus stop database");
+      }
+  }
+
+  private async fetchStopsFromLTA(): Promise<BusStopLocation[]> {
+      const allStops: BusStopLocation[] = [];
+      let skip = 0;
+      let fetching = true;
+      const batchSize = 500;
+
+      // LTA API requires AccountKey header. 
+      // We must use a proxy that supports header forwarding (like corsproxy.io)
+      
+      while (fetching) {
+          try {
+              // LTA BusStops API (2.4 in Documentation)
+              // Returns 500 records per call. Must loop using $skip.
+              const target = `${LTA_BASE_URL}/BusStops?$skip=${skip}`;
+              const proxy = `${PROXY_URL}${encodeURIComponent(target)}`;
+              
+              const res = await fetch(proxy, {
+                  headers: {
+                      'AccountKey': LTA_API_KEY,
+                      'accept': 'application/json'
+                  }
+              });
+
+              if (!res.ok) throw new Error(`LTA Status ${res.status}`);
+              
+              const data = await res.json();
+              const items = data.value || [];
+              
+              if (items.length === 0) {
+                  fetching = false;
+              } else {
+                  items.forEach((s: any) => {
+                      allStops.push({
+                          id: s.BusStopCode,
+                          name: s.Description,
+                          lat: s.Latitude,
+                          lng: s.Longitude
+                      });
+                  });
+                  skip += batchSize;
+                  
+                  // Log progress periodically
+                  if (skip % 1000 === 0) {
+                      mockService.emitLog("TRANSPORT", "INFO", `LTA Sync: ${allStops.length} stops loaded...`);
+                  }
+
+                  // Safety break (SG has approx 5000 stops, stop if we go way over)
+                  if (allStops.length > 7000) fetching = false;
+              }
+          } catch (e) {
+              console.error("LTA Loop Error", e);
+              fetching = false; // Stop on error to prevent infinite retries on block
+          }
+      }
+      
+      if (allStops.length === 0) throw new Error("LTA API returned no stops");
+      
+      mockService.emitLog("TRANSPORT", "INFO", `LTA Sync Complete: ${allStops.length} stops.`);
+      return allStops;
+  }
+
+  private processBusStopData(data: any): BusStopLocation[] {
+      try {
+          const stops: BusStopLocation[] = Object.keys(data).map(key => {
+              const item = data[key];
+              return {
+                  id: key,
+                  name: item.name,
+                  lng: item.coords[0],
+                  lat: item.coords[1]
+              };
+          });
+          this.allStopsCache = stops;
+          mockService.emitLog("TRANSPORT", "INFO", `DB Success: Loaded ${stops.length} stops`);
+          return stops;
+      } catch (e) {
+          console.error("Error processing bus stop data", e);
+          throw new Error("Data Malformed");
+      }
+  }
+
   async findNearestStops(lat: number, lng: number): Promise<BusStopLocation[]> {
-    const sorted = MOCK_STOPS.map(stop => {
-        if (!stop.lat || !stop.lng) return { ...stop, distance: 99999 };
+    const stops = await this.fetchAllBusStops();
+    
+    const sorted = stops.map(stop => {
+        if (stop.lat === undefined || stop.lng === undefined) return { ...stop, distance: 99999 };
         return {
             ...stop,
             distance: this.calculateDistance(lat, lng, stop.lat, stop.lng)
         };
-    }).sort((a, b) => a.distance - b.distance);
+    }).sort((a, b) => (a.distance || 9999) - (b.distance || 9999));
 
     return sorted.slice(0, 5);
+  }
+
+  async getBusStopInfo(id: string): Promise<BusStopLocation | undefined> {
+      // 1. Try loaded cache first
+      if (this.allStopsCache.length > 0) {
+          const cached = this.allStopsCache.find(s => s.id === id);
+          if (cached) return cached;
+      } 
+      
+      // 2. Fallback: OneMap API (Official SG Data)
+      try {
+          const res = await fetch(`https://www.onemap.gov.sg/api/common/elastic/search?searchVal=${id}&returnGeom=Y&getAddrDetails=Y&pageNum=1`);
+          if (res.ok) {
+              const data = await res.json();
+              const result = data.results?.find((r: any) => r.SEARCHVAL.includes(id) || r.SEARCHVAL.includes(id.toUpperCase()));
+              
+              if (result) {
+                  let name = result.SEARCHVAL.replace(/\s*\(\d+\)$/, '');
+                  name = name.replace(/\w\S*/g, (txt: string) => txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase());
+
+                  return {
+                      id: id,
+                      name: name,
+                      lat: parseFloat(result.LATITUDE),
+                      lng: parseFloat(result.LONGITUDE)
+                  };
+              }
+          }
+      } catch (e) {
+          console.warn("OneMap lookup failed for", id);
+      }
+      return undefined;
   }
 
   // --- TRAIN / LTA API ---
@@ -287,12 +443,13 @@ class TransportService {
           headers.append('AccountKey', LTA_API_KEY);
           headers.append('accept', 'application/json');
           
-          // NOTE: Fetching directly from browser usually fails CORS with LTA DataMall.
-          // We implement the fetch for correctness, but fallback to empty array (Normal status)
-          // or mock alerts on error to ensure app stability in browser-only mode.
-          const res = await fetch(`${LTA_BASE_URL}/TrainServiceAlerts`, {
+          // Must use Proxy for LTA
+          const proxyUrl = `${PROXY_URL}${encodeURIComponent(`${LTA_BASE_URL}/TrainServiceAlerts`)}`;
+          
+          const res = await fetch(proxyUrl, {
               method: 'GET',
-              headers: headers
+              headers: headers,
+              cache: 'no-store'
           });
 
           if (res.ok) {
@@ -301,87 +458,24 @@ class TransportService {
           }
           throw new Error("LTA API Status " + res.status);
       } catch (e) {
-          console.warn("LTA API Alert fetch failed (likely CORS). Using mock status.", e);
-          // Mock a disruption for demo purposes occasionally
-          // if (Math.random() > 0.8) return [{ Status: 2, Line: "NSL", Direction: "Both", Message: "Train delay from Ang Mo Kio to Bishan due to track fault." }];
+          console.warn("Train alerts failed", e);
           return []; 
       }
   }
 
-  // Crowd Density & Accessibility Simulation
-  // (As real-time LTA crowd/lift data often requires separate endpoints/approvals)
-  getStationCrowd(stationCode: string): StationCrowdData {
-    if (this.crowdCache[stationCode]) {
-        // simple cache invalidation logic could go here
-        return this.crowdCache[stationCode];
-    }
-
-    const hour = new Date().getHours();
-    const isPeak = (hour >= 7 && hour <= 9) || (hour >= 17 && hour <= 20);
-    
-    // Bias random based on peak hours and "Interchange" status (roughly approximated)
-    let bias = isPeak ? 0.6 : 0.2; 
-    // Interchanges are busier
-    if (['NS1', 'NS17', 'NS24', 'EW13', 'EW14', 'EW24'].includes(stationCode)) bias += 0.3;
-
-    const rand = Math.random();
-    let level: CrowdLevel = 'LOW';
-    if (rand < bias * 0.5) level = 'MODERATE';
-    if (rand < bias * 0.2) level = 'HIGH';
-
-    // Generate forecast
-    const forecast = [];
-    for (let i = 1; i <= 4; i++) {
-        const fTime = new Date(Date.now() + i * 30 * 60000);
-        // Simple trend logic
-        const fRand = Math.random();
-        let fLevel: CrowdLevel = 'LOW';
-        // Slightly smooth transitions
-        if (level === 'HIGH') fLevel = fRand > 0.3 ? 'HIGH' : 'MODERATE';
-        else if (level === 'MODERATE') fLevel = fRand > 0.5 ? 'MODERATE' : (fRand > 0.25 ? 'LOW' : 'HIGH');
-        else fLevel = fRand > 0.8 ? 'MODERATE' : 'LOW';
-
-        forecast.push({
-            time: fTime.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}),
-            level: fLevel
-        });
-    }
-
-    const data: StationCrowdData = {
-        stationCode,
-        current: level,
-        trend: Math.random() > 0.5 ? 'STABLE' : (Math.random() > 0.5 ? 'RISING' : 'FALLING'),
-        forecast
-    };
-
-    this.crowdCache[stationCode] = data;
-    return data;
+  // Removed mock data for Crowd - return null if no API available
+  getStationCrowd(stationCode: string): StationCrowdData | null {
+    return null;
   }
 
-  getLiftStatus(stationCode: string): StationAccessibility {
-      // Simulate ~5% chance of lift maintenance
-      const isMaintenance = Math.random() < 0.05;
-      return {
-          stationCode,
-          liftMaintenance: isMaintenance,
-          details: isMaintenance ? "Lift A (Concourse to Platform) under maintenance" : undefined
-      };
+  // Removed mock data for Lift - return null if no API available
+  getLiftStatus(stationCode: string): StationAccessibility | null {
+      return null;
   }
 
-  // --- PASSENGER VOLUME INSIGHTS ---
-  
-  getBusRouteInsight(serviceNo: string): string {
-      // Simulation of Passenger Volume (PV) by Bus / Origin-Destination (OD) analytics
-      // Logic is deterministic based on service number for demo consistency
-      const n = parseInt(serviceNo.replace(/\D/g, '')) || 0;
-      
-      if (n % 3 === 0) {
-          return "🔥 High Volume Route. Busiest: 07:30-09:00. Calmest: 14:00-16:00.";
-      } else if (n % 3 === 1) {
-          return "⚖️ Moderate Flow. Peak: 18:00-19:30. Generally seats available off-peak.";
-      } else {
-          return "📉 Feeder Profile. Short peak spikes at 07:00 & 18:00. Low ridership mid-day.";
-      }
+  // Removed mock data for Bus Insights
+  getBusRouteInsight(serviceNo: string): string | null {
+      return null;
   }
 
   getBusTypeLabel(type: string): string {
@@ -396,8 +490,34 @@ class TransportService {
   // --- UTILS ---
 
   async getAddress(lat: number, lng: number): Promise<string> {
-      // Mock reverse geocoding
-      return `${lat.toFixed(3)}, ${lng.toFixed(3)}`;
+      try {
+          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, {
+              headers: {
+                  'Accept-Language': 'en'
+              }
+          });
+          
+          if (!res.ok) throw new Error("Nominatim API failed");
+          
+          const data = await res.json();
+          const addr = data.address;
+          
+          if (addr) {
+              const name = addr.amenity || addr.building || addr.shop || addr.tourism || addr.leisure;
+              const road = addr.road || addr.pedestrian || addr.street || addr.footway;
+              const area = addr.suburb || addr.neighbourhood || addr.district || addr.city || addr.town;
+              
+              if (name && road) return `${name}, ${road}`;
+              if (name && area) return `${name}, ${area}`;
+              if (road && area) return `${road}, ${area}`;
+              if (road) return road;
+              return area || data.display_name?.split(',')[0] || "Unknown Location";
+          }
+          
+          return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+      } catch (e) {
+          return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+      }
   }
 
   calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -477,8 +597,50 @@ class TransportService {
   }
 
   async getStopSchedule(stopId: string): Promise<Record<string, BusSchedule>> {
-      // Mock schedule data
       return {};
+  }
+
+  // --- NEW: Interval Calculation ---
+  public getBusInterval(bus: BusServiceData): string | null {
+      // Calculate interval based on live data gaps
+      if (bus.next && bus.subsequent) {
+          const diff1 = bus.subsequent.mins - bus.next.mins;
+          if (bus.subsequent2) {
+             const diff2 = bus.subsequent2.mins - bus.subsequent.mins;
+             // If we have 3 data points, average them for stability
+             const avg = Math.round((diff1 + diff2) / 2);
+             if (avg > 0) return `${avg} min`;
+          }
+          if (diff1 > 0) return `${diff1} min`;
+      }
+      return null;
+  }
+
+  // --- NEW: AI Crowd Prediction ---
+  public async generateCrowdInsight(bus: BusServiceData, stopName: string): Promise<string> {
+      try {
+          const now = new Date();
+          const time = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const day = now.toLocaleDateString([], { weekday: 'long' });
+          const load = bus.next?.load || "Unknown";
+          
+          const prompt = `
+          Predict if Bus ${bus.serviceNo} at ${stopName} will be full/crowded.
+          Context: Time: ${time}, Day: ${day} (Singapore).
+          Live Status: ${load} (SEA=Seats, SDA=Standing, LSD=Limited Standing).
+          Consider peak hours, holidays, and school hours.
+          Reply in 1 short sentence (max 12 words). Start with "Prediction:".
+          `;
+
+          const response = await this.genAI.models.generateContent({
+              model: 'gemini-2.5-flash',
+              contents: prompt,
+          });
+
+          return response.text.trim();
+      } catch (e) {
+          return "Prediction unavailable.";
+      }
   }
 }
 
